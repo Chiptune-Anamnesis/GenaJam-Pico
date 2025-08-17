@@ -1,20 +1,3 @@
-// RP2040 "GenMDM v1.02" USB-MIDI -> Genesis Controller Port Transport
-// Board: Raspberry Pi Pico / RP2040-Zero (Earle Philhower core)
-// Tools -> USB Stack: Adafruit TinyUSB
-// Tools -> USB Type: MIDI
-//
-// *** Genesis wiring (through level-shift / open-collector) ***
-//   D3..D0 = Genesis pins 1 (Up), 2 (Down), 3 (Left), 4 (Right)
-//   TL     = Genesis pin 9  (C / TL)  [we *drive* this (open-collector)]
-//   TH     = Genesis pin 7           [we *read* this via divider]
-//   GND    = Genesis pin 8
-//
-// Protocol summary:
-//   - Console toggles TH (both edges).
-//   - On each edge: we put the next nibble on D3..D0, then set TL to *mirror* TH.
-//   - The stream itself is *raw MIDI bytes* (GenMDM v1.02 framing), which our ISR
-//     splits into nibbles (high, then low) as the console clocks them in.
-
 #include <Arduino.h>
 #include <Adafruit_TinyUSB.h>
 #include <MIDI.h>
@@ -23,17 +6,21 @@
 Adafruit_USBD_MIDI usb_midi;
 MIDI_CREATE_INSTANCE(Adafruit_USBD_MIDI, usb_midi, MIDI);
 
-// ------------ Pin map (change if you like) ------------
-static const uint8_t PIN_D0 = 2;   // -> Genesis pin 4 (Right) via open-collector
+// ------------ Pin map (Pico GPIO → open-collector buffer → Genesis) ------------
+static const uint8_t PIN_D0 = 2;   // -> Genesis pin 4 (Right)
 static const uint8_t PIN_D1 = 3;   // -> Genesis pin 3 (Left)
 static const uint8_t PIN_D2 = 4;   // -> Genesis pin 2 (Down)
 static const uint8_t PIN_D3 = 5;   // -> Genesis pin 1 (Up)
-static const uint8_t PIN_TL = 6;   // -> Genesis pin 9 (C/TL) open-collector
-static const uint8_t PIN_TH = 7;   // <- Genesis pin 7 (TH) via divider to 3.3V
+static const uint8_t PIN_TL = 6;   // -> Genesis pin 9 (C/TL)
+static const uint8_t PIN_TH = 7;   // <- Genesis pin 7 (TH, divider to Pico)
+
+// Optional debug LED on Pico (built-in = 25)
+static const uint8_t LED_GPIO = LED_BUILTIN;
+#define DEBUG_LED 0  // set to 1 to flash briefly on TH edges
 
 // ------------ Open-collector helpers ------------
 inline void ocDriveLow(uint8_t pin) { pinMode(pin, OUTPUT); digitalWrite(pin, LOW); }
-inline void ocRelease(uint8_t pin)  { pinMode(pin, INPUT); /* float; console pulls up */ }
+inline void ocRelease(uint8_t pin)  { pinMode(pin, INPUT); }
 
 inline void writeOC(uint8_t pin, bool highRelease) {
   if (highRelease) ocRelease(pin); else ocDriveLow(pin);
@@ -47,22 +34,21 @@ inline void outputNibble(uint8_t n) {
   writeOC(PIN_D3, (n >> 3) & 1);
 }
 
-// TL mirrors TH once nibble is valid (TH=1 -> TL released; TH=0 -> TL low)
+// TL mirrors TH once nibble is valid
 inline void setTLByTH(bool thLevel) {
   writeOC(PIN_TL, thLevel ? true : false);
 }
 
-// ------------ Byte->Nibble FIFO ------------
+// ------------ Byte→Nibble FIFO ------------
 static const uint16_t NIB_FIFO_SZ = 1024;
 volatile uint8_t  nibFifo[NIB_FIFO_SZ];
 volatile uint16_t nibHead = 0, nibTail = 0;
 
 inline bool fifoEmpty() { return nibHead == nibTail; }
-inline bool fifoFull()  { return (uint16_t)((nibHead + 1) % NIB_FIFO_SZ) == nibTail; }
 
 void fifoPushNib(uint8_t n) {
   uint16_t next = (uint16_t)((nibHead + 1) % NIB_FIFO_SZ);
-  if (next == nibTail) return; // drop on overflow
+  if (next == nibTail) return; // drop if full
   nibFifo[nibHead] = (n & 0x0F);
   nibHead = next;
 }
@@ -74,14 +60,13 @@ uint8_t fifoPopNib() {
   return v;
 }
 
-// Push a raw MIDI byte -> two nibbles (high, low)
+// Push a raw MIDI byte → two nibbles
 inline void fifoPushByte(uint8_t b) {
   fifoPushNib((uint8_t)((b >> 4) & 0x0F));
   fifoPushNib((uint8_t)(b & 0x0F));
 }
 
-// ------------ GenMDM v1.02 exact framing ------------
-// Just push literal MIDI bytes. No preambles or padding.
+// ------------ GenMDM v1.02 framing = raw MIDI bytes ------------
 void encodeRawMidi3(uint8_t status, uint8_t d1, uint8_t d2) {
   fifoPushByte(status);
   fifoPushByte(d1);
@@ -95,8 +80,8 @@ void encodeRawMidi1(uint8_t status) {
   fifoPushByte(status);
 }
 
-// SysEx passthrough (F0 ... F7) as-is
-void hSysEx(byte *data, unsigned length, bool /*complete*/) {
+// SysEx passthrough (MIDI lib v5.x = 2-arg callback)
+void hSysEx(byte *data, unsigned length) {
   fifoPushByte(0xF0);
   for (unsigned i = 0; i < length; ++i) fifoPushByte(data[i]);
   fifoPushByte(0xF7);
@@ -106,15 +91,28 @@ void hSysEx(byte *data, unsigned length, bool /*complete*/) {
 volatile bool lastTH = true;
 
 void thISR() {
+#if DEBUG_LED
+  digitalWrite(LED_GPIO, HIGH);
+#endif
   bool th = digitalRead(PIN_TH);
-  // On each TH edge, present next nibble and then mirror TL to TH.
-  uint8_t n = fifoEmpty() ? 0x0 : fifoPopNib();
+
+  // Pop next nibble or idle as 0xF (all released/high)
+  uint8_t n = fifoEmpty() ? 0xF : fifoPopNib();
   outputNibble(n);
+
+  // Let data lines settle before acknowledging
+  delayMicroseconds(2);
+
+  // Mirror TH on TL
   setTLByTH(th);
   lastTH = th;
+
+#if DEBUG_LED
+  digitalWrite(LED_GPIO, LOW);
+#endif
 }
 
-// ------------ MIDI Handlers (channel numbers are 1..16) ------------
+// ------------ MIDI Handlers ------------
 void hNoteOn(byte ch, byte note, byte vel) {
   if (vel == 0) {
     encodeRawMidi3(0x80 | ((ch - 1) & 0x0F), note, 0);
@@ -145,12 +143,17 @@ void hAfterTouchNote(byte ch, byte note, byte val) {
 
 // ------------ Setup / Loop ------------
 void setup() {
-  // Release all open-collector outputs (float-high via console pull-ups)
+#if DEBUG_LED
+  pinMode(LED_GPIO, OUTPUT);
+  digitalWrite(LED_GPIO, LOW);
+#endif
+
+  // Release outputs (float-high)
   ocRelease(PIN_D0); ocRelease(PIN_D1);
   ocRelease(PIN_D2); ocRelease(PIN_D3);
   ocRelease(PIN_TL);
 
-  pinMode(PIN_TH, INPUT); // feed through resistor divider
+  pinMode(PIN_TH, INPUT); // TH through divider
 
   usb_midi.setStringDescriptor("Pico GenMDM v1.02 Transport");
 
@@ -164,15 +167,14 @@ void setup() {
   MIDI.setHandleAfterTouchPoly(hAfterTouchNote);
   MIDI.setHandleSystemExclusive(hSysEx);
 
-  // Interrupt on both edges of TH
+  // Interrupt on both TH edges
   attachInterrupt(digitalPinToInterrupt(PIN_TH), thISR, CHANGE);
 
-  // Prime lines to a known state
-  outputNibble(0x0);
+  // Prime bus to "idle ones"
+  outputNibble(0xF);
   setTLByTH(digitalRead(PIN_TH));
 }
 
 void loop() {
-  // Service USB-MIDI
-  MIDI.read();
+  MIDI.read();  // USB-MIDI service
 }
