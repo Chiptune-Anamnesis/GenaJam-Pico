@@ -16,7 +16,7 @@
 
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
 
-// Pin definitions based on your mapping
+// Pin definitions
 #define OLED_SDA_PIN 8
 #define OLED_SCL_PIN 9
 #define SD_CS_PIN 5
@@ -62,10 +62,8 @@ const uint16_t messagedelay = 700;
 
 // Global variables
 uint8_t lcd_key = 0;
-unsigned long buttonpushed = 0;
 unsigned long messagestart = 0;
 uint8_t refreshscreen = 0;
-
 
 // File handling
 const uint8_t MaxNumberOfChars = 21;
@@ -101,9 +99,7 @@ uint8_t polynote[6] = {0, 0, 0, 0, 0, 0};
 bool polyon[6] = {0, 0, 0, 0, 0, 0};
 bool sustainon[6] = {0, 0, 0, 0, 0, 0};
 bool noteheld[6] = {0, 0, 0, 0, 0, 0};
-uint8_t lowestnote = 0;
 bool sustain = 0;
-uint8_t notecounter = 0;
 
 // FM parameter screen navigation
 uint8_t fmscreen = 1;
@@ -124,152 +120,6 @@ uint16_t savenumber = 1;
 char savefilefull[] = "newpatch001.tfi";
 
 // Flash storage replacement with EEPROM
-
-
-
-// ===================== Last MIDI overlay =====================
-
- // track whether overlay is currently on-screen
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// Right-align small text at y on a 128px-wide display using default font (6px per char)
-
-
-
-// Draw the overlay only on preset screens (MONO|PRESET=1, POLY|PRESET=3)
-
-
-
-// Periodic overlay housekeeping: hide after 3s of inactivity.
-
-
-
-// =============================================================
-
-
-// ===================== Last MIDI overlay =====================
-// Forward declarations for OLED helpers used below:
-void oled_print(int x, int y, const char* text);
-void oled_refresh();
-void oled_fill_rect(int x, int y, int w, int h);
-
-// Fixed overlay region in top-right; wide enough for "Ch16 A#-1"
-// removed old overlay const  // generous
-// removed old overlay const
-// removed old overlay const
-// removed old overlay const
-// removed old overlay const
-// removed old overlay const    // top row
-
-volatile uint8_t  lastMidiChannel = 0;
-volatile uint8_t  lastMidiNote    = 0;
-volatile uint32_t lastMidiTime    = 0;
-volatile bool     overlayVisible  = false;
-
-// Dynamic overlay layout
-const int OVERLAY_Y = 0; // top row
-// removed old overlay const               // top row
-const int OVERLAY_RIGHT_MARGIN = 0;    // px from the right edge; increase to shift left
-const int OVERLAY_CLEAR_PAD = 2;       // px padding around clear region
-
-// Track last drawn overlay position/size for precise clearing
-static int lastOverlayX = 128;         // start off-screen
-static int lastOverlayLen = 0;         // in characters
-
-const char* note_names[12] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
-
-static inline void format_note(uint8_t note, char* out, size_t outlen) {
-    uint8_t n = note % 12;
-    int8_t  oct = (int8_t)note / 12 - 1;
-    snprintf(out, outlen, "%s%d", note_names[n], oct);
-}
-
-// Draw or clear the "last MIDI (ch note)" overlay in the top-right of the screen.
-// Auto-hides after 3000 ms of inactivity. Only active on PRESET screens (mode 1 or 3).
-void draw_last_midi_overlay_if_preset_screen() {
-    if (!(mode == 1 || mode == 3)) return;
-
-    const uint32_t now = millis();
-    const uint32_t timeout_ms = 3000;
-
-    // Auto-hide when stale
-    if (overlayVisible && (now - lastMidiTime > timeout_ms)) {
-        if (lastOverlayLen > 0) {
-            int prev_right = lastOverlayX + lastOverlayLen * 6;
-            int clear_left = lastOverlayX - OVERLAY_CLEAR_PAD; if (clear_left < 0) clear_left = 0;
-            int clear_right = prev_right + OVERLAY_CLEAR_PAD; if (clear_right > 128) clear_right = 128;
-            int clear_w = clear_right - clear_left;
-            if (clear_w > 0) oled_fill_rect(clear_left, OVERLAY_Y, clear_w, 8);
-            oled_refresh();
-        }
-        overlayVisible = false;
-        lastOverlayLen = 0;
-        return;
-    }
-    if (!overlayVisible) return;
-
-    // Compose text "Ch%u NOTE"
-    char nb[8]; char buf[16];
-    format_note(lastMidiNote, nb, sizeof(nb));
-    snprintf(buf, sizeof(buf), "Ch%u %s", lastMidiChannel, nb);
-
-    // Right align on top row with adjustable right margin
-    int len = strlen(buf);
-    int x = 128 - len * 6 - OVERLAY_RIGHT_MARGIN;
-    if (x < 0) x = 0;
-
-    // Clear the union of previous and current boxes
-    int prev_right = lastOverlayX + lastOverlayLen * 6;
-    int curr_right = x + len * 6;
-    int clear_left = (lastOverlayLen ? (lastOverlayX < x ? lastOverlayX : x) : x) - OVERLAY_CLEAR_PAD;
-    if (clear_left < 0) clear_left = 0;
-    int clear_right = (prev_right > curr_right ? prev_right : curr_right) + OVERLAY_CLEAR_PAD;
-    if (clear_right > 128) clear_right = 128;
-    int clear_w = clear_right - clear_left;
-    if (clear_w > 0) oled_fill_rect(clear_left, OVERLAY_Y, clear_w, 8);
-
-    // Draw and remember position
-    oled_print(x, OVERLAY_Y, buf);
-    oled_refresh();
-    lastOverlayX = x;
-    lastOverlayLen = len;
-}
-
-// Periodic housekeeping: hide after 3s when idle.
-void overlay_tick() {
-    if (!(mode == 1 || mode == 3)) return;
-
-    const uint32_t now = millis();
-    const uint32_t timeout_ms = 3000;
-
-    if (overlayVisible && (now - lastMidiTime > timeout_ms)) {
-        // Clear using last known region
-        if (lastOverlayLen > 0) {
-            int prev_right = lastOverlayX + lastOverlayLen * 6;
-            int clear_left = lastOverlayX - OVERLAY_CLEAR_PAD; if (clear_left < 0) clear_left = 0;
-            int clear_right = prev_right + OVERLAY_CLEAR_PAD; if (clear_right > 128) clear_right = 128;
-            int clear_w = clear_right - clear_left;
-            if (clear_w > 0) oled_fill_rect(clear_left, OVERLAY_Y, clear_w, 8);
-            oled_refresh();
-        }
-        overlayVisible = false;
-        lastOverlayLen = 0;
-    }
-}
-// =============================================================
-
 void flash_write_settings(uint8_t region_val, uint8_t midi_ch);
 uint8_t flash_read_setting(uint8_t offset);
 
@@ -278,8 +128,6 @@ void setup_hardware(void);
 void setup_midi(void);
 void setup_sd(void);
 void setup_oled(void);
-uint64_t get_time_ms(void);
-void delay_ms(uint32_t ms);
 uint8_t read_buttons(void);
 
 // Mode and display functions
@@ -293,40 +141,6 @@ void saveprompt(void);
 void savenew(void);
 void saveoverwrite(void);
 void deletefile(void);
-
-// TFI and channel operations
-static bool get_tfi_fullname_by_index(uint16_t idx, char* out, size_t outlen) {
-    File root = SD.open("/");
-    if (!root) return false;
-    uint16_t seen = 0;
-
-    while (true) {
-        File entry = root.openNextFile();
-        if (!entry) break;
-        if (!entry.isDirectory()) {
-            const char* nm = entry.name();
-            int L = strlen(nm);
-            bool isTFI = (L >= 4 &&
-                          (nm[L-4] == '.') &&
-                          ((nm[L-3] == 't' || nm[L-3] == 'T')) &&
-                          ((nm[L-2] == 'f' || nm[L-2] == 'F')) &&
-                          ((nm[L-1] == 'i' || nm[L-1] == 'I')));
-            if (isTFI) {
-                if (seen == idx) {
-                    strncpy(out, nm, outlen - 1);
-                    out[outlen - 1] = '\0';
-                    entry.close();
-                    root.close();
-                    return true;
-                }
-                seen++;
-            }
-        }
-        entry.close();
-    }
-    root.close();
-    return false;
-}
 
 void tfiselect(void);
 void channelselect(void);
@@ -344,14 +158,6 @@ void midi_send_note_off(uint8_t channel, uint8_t note, uint8_t velocity);
 void midi_send_pitch_bend(uint8_t channel, int16_t bend);
 void handle_midi_input(void);
 void handle_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
-    // Track last MIDI activity for on-screen overlay
-    lastMidiChannel = channel;
-    lastMidiNote = note;
-    lastMidiTime = millis();
-    overlayVisible = true;
-    if (mode == 1 || mode == 3) {
-        draw_last_midi_overlay_if_preset_screen();
-    }
     if (channel >= 1 && channel <= 6) {
         polyon[channel-1] = true;
         polynote[channel-1] = note;
@@ -385,14 +191,9 @@ void handle_control_change(uint8_t channel, uint8_t cc, uint8_t value) {
 }
 
 // Utility functions
-void printzeros(int zeronum, char* buffer);
-void printspaces(int zeronum, char* buffer);
 void oled_print(int x, int y, const char* text);
 void oled_clear(void);
 void oled_refresh(void);
-
-
-
 
 void setup() {
     setup_hardware();
@@ -432,8 +233,6 @@ void setup() {
 }
 
 void loop() {
-    overlay_tick();
-    overlay_tick();
     if (booted == 0) {
         lcd_key = read_buttons();
         if (lcd_key == btnSELECT) {
@@ -934,82 +733,130 @@ void applyTFIToAllChannelsImmediate() {
 
 
 void scandir(bool saved) {
-    File root = SD.open("/");
     n = 0;
-
-    if (!root) {
-        return; // Could not open root directory
-    }
-
-    while (true) {
-        File entry = root.openNextFile();
-        if (!entry) {
-            break; // No more files
+    scanDirectoryRecursive("/", saved);
+    
+    // Clamp selections if list shrank
+    for (int i = 0; i < 6; ++i) {
+        if (n == 0) { 
+            tfifilenumber[i] = 0; 
+        } else if (tfifilenumber[i] >= n) { 
+            tfifilenumber[i] = n - 1; 
         }
+    }
+}
 
-        if (!entry.isDirectory() && n < nMax) {
-            const char* nm = entry.name();
-            // accept only .tfi / .TFI
-            int L = strlen(nm);
-            bool isTFI = (L >= 4 &&
-                          (nm[L-4] == '.') &&
-                          ((nm[L-3] == 't' || nm[L-3] == 'T')) &&
-                          ((nm[L-2] == 'f' || nm[L-2] == 'F')) &&
-                          ((nm[L-1] == 'i' || nm[L-1] == 'I')));
+void scanDirectoryRecursive(const char* path, bool saved) {
+    if (n >= nMax - 10) return; // Leave some buffer space
+    
+    File dir = SD.open(path);
+    if (!dir || !dir.isDirectory()) {
+        if (dir) dir.close();
+        return;
+    }
+    
+    // Show progress during scanning
+    if (strcmp(path, "/") == 0) {
+        display.clearDisplay();
+        display.setCursor(0, 0);
+        display.print("Scanning files...");
+        display.display();
+    }
+    
+    while (n < nMax - 10) {
+        File entry = dir.openNextFile();
+        if (!entry) break;
+        
+        const char* name = entry.name();
+        if (!name || strlen(name) == 0) {
+            entry.close();
+            continue;
+        }
+        
+        // Skip system files/folders
+        if (name[0] == '.' || 
+            strstr(name, "System Volume") != NULL ||
+            strstr(name, "$RECYCLE") != NULL) {
+            entry.close();
+            continue;
+        }
+        
+        if (entry.isDirectory()) {
+            // Recursively scan subdirectory
+            char subPath[96];
+            if (strcmp(path, "/") == 0) {
+                snprintf(subPath, 96, "/%s", name);
+            } else {
+                snprintf(subPath, 96, "%s/%s", path, name);
+            }
+            entry.close();
+            scanDirectoryRecursive(subPath, saved);
+            
+        } else {
+            // Check for TFI files
+            int nameLen = strlen(name);
+            bool isTFI = (nameLen >= 4 &&
+                         name[nameLen-4] == '.' &&
+                         (name[nameLen-3] == 't' || name[nameLen-3] == 'T') &&
+                         (name[nameLen-2] == 'f' || name[nameLen-2] == 'F') &&
+                         (name[nameLen-1] == 'i' || name[nameLen-1] == 'I'));
+                         
             if (isTFI) {
-                // ---- store full exact filename for fast open/delete ----
-                strncpy(fullnames[n], nm, FullNameChars-1);
-                fullnames[n][FullNameChars-1] = '\0';
-
-                // ---- build display name without ".tfi" ----
-                int dispLen = L - 4; // strip ".tfi"
-                if (dispLen < 0) dispLen = 0;
-                int copyLen = (dispLen > MaxNumberOfChars) ? MaxNumberOfChars : dispLen;
-                for (int i = 0; i < copyLen; ++i) filenames[n][i] = nm[i];
-                filenames[n][copyLen] = '\0';
-
-                // if we just saved a file, move selection to that file (compare full names incl. .tfi)
-                if (saved && strcmp(nm, savefilefull) == 0) {
+                // Create display name with folder prefix if not in root
+                if (strcmp(path, "/") == 0) {
+                    // Root file - just use filename without .tfi
+                    int dispLen = nameLen - 4;
+                    if (dispLen > MaxNumberOfChars) dispLen = MaxNumberOfChars;
+                    strncpy(filenames[n], name, dispLen);
+                    filenames[n][dispLen] = '\0';
+                    
+                    // Store full path
+                    snprintf(fullnames[n], FullNameChars, "/%s", name);
+                    
+                } else {
+                    // Subfolder file - just use filename without .tfi extension
+                    int dispLen = nameLen - 4;
+                    if (dispLen > MaxNumberOfChars) dispLen = MaxNumberOfChars;
+                    strncpy(filenames[n], name, dispLen);
+                    filenames[n][dispLen] = '\0';
+                    
+                    // Store full path for loading
+                    snprintf(fullnames[n], FullNameChars, "%s/%s", path, name);
+                }
+                
+                // Check if this is the saved file we're looking for
+                char fullPath[FullNameChars];
+                snprintf(fullPath, FullNameChars, "%s/%s", path, name);
+                if (saved && strcmp(name, savefilefull) == 0) {
                     for (int i = 0; i < 6; i++) tfifilenumber[i] = n;
                 }
+                
                 n++;
+                
+                // Update progress display occasionally
+                if (n % 20 == 0) {
+                    display.clearDisplay();
+                    display.setCursor(0, 0);
+                    display.print("Scanning files...");
+                    display.setCursor(0, 16);
+                    display.print("Found: ");
+                    display.print(n);
+                    display.display();
+                }
             }
+            entry.close();
         }
-        entry.close();
-        if (n >= nMax) break; // Prevent overflow
+        
+        // Yield periodically to prevent watchdog timeout
+        if (n % 10 == 0) {
+            delay(1);
+            handle_midi_input();
+        }
     }
-    root.close();
-
-// clamp selections if list shrank
-    for (int i = 0; i < 6; ++i) {
-        if (n == 0) { tfifilenumber[i] = 0; }
-        else if (tfifilenumber[i] >= n) { tfifilenumber[i] = n - 1; }
-    }
+    
+    dir.close();
 }
 
-void printzeros(int zeronum, char* buffer) {
-    if (zeronum < 100) strcat(buffer, "0");
-    if (zeronum < 10) strcat(buffer, "0");
-    char num_str[4];
-    sprintf(num_str, "%d", zeronum);
-    strcat(buffer, num_str);
-}
-
-void printspaces(int zeronum, char* buffer) {
-    if (zeronum < 100) strcat(buffer, " ");
-    if (zeronum < 10) strcat(buffer, " ");
-    char num_str[4];
-    sprintf(num_str, "%d", zeronum);
-    strcat(buffer, num_str);
-}
-
-uint64_t get_time_ms(void) {
-    return millis();
-}
-
-void delay_ms(uint32_t ms) {
-    delay(ms);
-}
 
 void oled_print(int x, int y, const char* text) {
     display.setCursor(x, y);
@@ -1023,13 +870,6 @@ void oled_clear(void) {
 void oled_refresh(void) {
     display.display();
 }
-
-// Fill a rectangular region with BLACK (used to clear overlay area)
-void oled_fill_rect(int x, int y, int w, int h) {
-    display.fillRect(x, y, w, h, BLACK);
-}
-
-
 
 void modechange(int modetype) {
     bool quickswitch = false;
@@ -1102,7 +942,6 @@ void modechange(int modetype) {
     }
     oled_refresh();
 }
-
 
 void modechangemessage(void) {
     if ((millis() - messagestart) > messagedelay && refreshscreen == 1) {
@@ -1545,7 +1384,6 @@ void updateFileDisplay(void) {
     showAccelerationFeedback();
     
     oled_refresh();
-    draw_last_midi_overlay_if_preset_screen();
 }
 
 void tfisend(int opnarray[42], int sendchannel) {
@@ -2157,4 +1995,15 @@ void handle_pitch_bend(uint8_t channel, int16_t bend) {
         // Pass other channels straight through
         MIDI.sendPitchBend(bend, channel);
     }
+}
+
+void showScanResults() {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.print("Scan complete!");
+    display.setCursor(0, 16);
+    display.print("Files found: ");
+    display.print(n);
+    display.display();
+    delay(1500);
 }
