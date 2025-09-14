@@ -124,6 +124,152 @@ uint16_t savenumber = 1;
 char savefilefull[] = "newpatch001.tfi";
 
 // Flash storage replacement with EEPROM
+
+
+
+// ===================== Last MIDI overlay =====================
+
+ // track whether overlay is currently on-screen
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Right-align small text at y on a 128px-wide display using default font (6px per char)
+
+
+
+// Draw the overlay only on preset screens (MONO|PRESET=1, POLY|PRESET=3)
+
+
+
+// Periodic overlay housekeeping: hide after 3s of inactivity.
+
+
+
+// =============================================================
+
+
+// ===================== Last MIDI overlay =====================
+// Forward declarations for OLED helpers used below:
+void oled_print(int x, int y, const char* text);
+void oled_refresh();
+void oled_fill_rect(int x, int y, int w, int h);
+
+// Fixed overlay region in top-right; wide enough for "Ch16 A#-1"
+// removed old overlay const  // generous
+// removed old overlay const
+// removed old overlay const
+// removed old overlay const
+// removed old overlay const
+// removed old overlay const    // top row
+
+volatile uint8_t  lastMidiChannel = 0;
+volatile uint8_t  lastMidiNote    = 0;
+volatile uint32_t lastMidiTime    = 0;
+volatile bool     overlayVisible  = false;
+
+// Dynamic overlay layout
+const int OVERLAY_Y = 0; // top row
+// removed old overlay const               // top row
+const int OVERLAY_RIGHT_MARGIN = 0;    // px from the right edge; increase to shift left
+const int OVERLAY_CLEAR_PAD = 2;       // px padding around clear region
+
+// Track last drawn overlay position/size for precise clearing
+static int lastOverlayX = 128;         // start off-screen
+static int lastOverlayLen = 0;         // in characters
+
+const char* note_names[12] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+
+static inline void format_note(uint8_t note, char* out, size_t outlen) {
+    uint8_t n = note % 12;
+    int8_t  oct = (int8_t)note / 12 - 1;
+    snprintf(out, outlen, "%s%d", note_names[n], oct);
+}
+
+// Draw or clear the "last MIDI (ch note)" overlay in the top-right of the screen.
+// Auto-hides after 3000 ms of inactivity. Only active on PRESET screens (mode 1 or 3).
+void draw_last_midi_overlay_if_preset_screen() {
+    if (!(mode == 1 || mode == 3)) return;
+
+    const uint32_t now = millis();
+    const uint32_t timeout_ms = 3000;
+
+    // Auto-hide when stale
+    if (overlayVisible && (now - lastMidiTime > timeout_ms)) {
+        if (lastOverlayLen > 0) {
+            int prev_right = lastOverlayX + lastOverlayLen * 6;
+            int clear_left = lastOverlayX - OVERLAY_CLEAR_PAD; if (clear_left < 0) clear_left = 0;
+            int clear_right = prev_right + OVERLAY_CLEAR_PAD; if (clear_right > 128) clear_right = 128;
+            int clear_w = clear_right - clear_left;
+            if (clear_w > 0) oled_fill_rect(clear_left, OVERLAY_Y, clear_w, 8);
+            oled_refresh();
+        }
+        overlayVisible = false;
+        lastOverlayLen = 0;
+        return;
+    }
+    if (!overlayVisible) return;
+
+    // Compose text "Ch%u NOTE"
+    char nb[8]; char buf[16];
+    format_note(lastMidiNote, nb, sizeof(nb));
+    snprintf(buf, sizeof(buf), "Ch%u %s", lastMidiChannel, nb);
+
+    // Right align on top row with adjustable right margin
+    int len = strlen(buf);
+    int x = 128 - len * 6 - OVERLAY_RIGHT_MARGIN;
+    if (x < 0) x = 0;
+
+    // Clear the union of previous and current boxes
+    int prev_right = lastOverlayX + lastOverlayLen * 6;
+    int curr_right = x + len * 6;
+    int clear_left = (lastOverlayLen ? (lastOverlayX < x ? lastOverlayX : x) : x) - OVERLAY_CLEAR_PAD;
+    if (clear_left < 0) clear_left = 0;
+    int clear_right = (prev_right > curr_right ? prev_right : curr_right) + OVERLAY_CLEAR_PAD;
+    if (clear_right > 128) clear_right = 128;
+    int clear_w = clear_right - clear_left;
+    if (clear_w > 0) oled_fill_rect(clear_left, OVERLAY_Y, clear_w, 8);
+
+    // Draw and remember position
+    oled_print(x, OVERLAY_Y, buf);
+    oled_refresh();
+    lastOverlayX = x;
+    lastOverlayLen = len;
+}
+
+// Periodic housekeeping: hide after 3s when idle.
+void overlay_tick() {
+    if (!(mode == 1 || mode == 3)) return;
+
+    const uint32_t now = millis();
+    const uint32_t timeout_ms = 3000;
+
+    if (overlayVisible && (now - lastMidiTime > timeout_ms)) {
+        // Clear using last known region
+        if (lastOverlayLen > 0) {
+            int prev_right = lastOverlayX + lastOverlayLen * 6;
+            int clear_left = lastOverlayX - OVERLAY_CLEAR_PAD; if (clear_left < 0) clear_left = 0;
+            int clear_right = prev_right + OVERLAY_CLEAR_PAD; if (clear_right > 128) clear_right = 128;
+            int clear_w = clear_right - clear_left;
+            if (clear_w > 0) oled_fill_rect(clear_left, OVERLAY_Y, clear_w, 8);
+            oled_refresh();
+        }
+        overlayVisible = false;
+        lastOverlayLen = 0;
+    }
+}
+// =============================================================
+
 void flash_write_settings(uint8_t region_val, uint8_t midi_ch);
 uint8_t flash_read_setting(uint8_t offset);
 
@@ -198,6 +344,14 @@ void midi_send_note_off(uint8_t channel, uint8_t note, uint8_t velocity);
 void midi_send_pitch_bend(uint8_t channel, int16_t bend);
 void handle_midi_input(void);
 void handle_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
+    // Track last MIDI activity for on-screen overlay
+    lastMidiChannel = channel;
+    lastMidiNote = note;
+    lastMidiTime = millis();
+    overlayVisible = true;
+    if (mode == 1 || mode == 3) {
+        draw_last_midi_overlay_if_preset_screen();
+    }
     if (channel >= 1 && channel <= 6) {
         polyon[channel-1] = true;
         polynote[channel-1] = note;
@@ -237,6 +391,9 @@ void oled_print(int x, int y, const char* text);
 void oled_clear(void);
 void oled_refresh(void);
 
+
+
+
 void setup() {
     setup_hardware();
     setup_oled();
@@ -275,6 +432,8 @@ void setup() {
 }
 
 void loop() {
+    overlay_tick();
+    overlay_tick();
     if (booted == 0) {
         lcd_key = read_buttons();
         if (lcd_key == btnSELECT) {
@@ -865,6 +1024,13 @@ void oled_refresh(void) {
     display.display();
 }
 
+// Fill a rectangular region with BLACK (used to clear overlay area)
+void oled_fill_rect(int x, int y, int w, int h) {
+    display.fillRect(x, y, w, h, BLACK);
+}
+
+
+
 void modechange(int modetype) {
     bool quickswitch = false;
     
@@ -1379,6 +1545,7 @@ void updateFileDisplay(void) {
     showAccelerationFeedback();
     
     oled_refresh();
+    draw_last_midi_overlay_if_preset_screen();
 }
 
 void tfisend(int opnarray[42], int sendchannel) {
