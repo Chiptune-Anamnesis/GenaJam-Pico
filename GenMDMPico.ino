@@ -99,6 +99,16 @@ uint8_t last_midi_channel = 0;
 uint8_t last_midi_note = 0;
 unsigned long last_midi_time = 0;
 const uint16_t midi_display_timeout = 2000;
+static bool display_needs_refresh = false;
+static unsigned long last_display_update = 0;
+
+
+// Visualizer
+uint8_t voice_velocity[11] = {0,0,0,0,0,0,0,0,0,0,0};        // Current velocity per channel
+uint8_t voice_peak[11] = {0,0,0,0,0,0,0,0,0,0,0};            // Peak hold values
+unsigned long voice_peak_time[11] = {0,0,0,0,0,0,0,0,0,0,0}; // When peak was set
+const uint16_t peak_hold_duration = 800;                      // Peak hold time in ms
+const uint8_t velocity_decay_rate = 2;                        // How fast bars decay
 
 // Polyphony settings
 uint8_t polynote[6] = {0, 0, 0, 0, 0, 0};
@@ -165,32 +175,44 @@ void midi_send_note_on(uint8_t channel, uint8_t note, uint8_t velocity);
 void midi_send_note_off(uint8_t channel, uint8_t note, uint8_t velocity);
 void midi_send_pitch_bend(uint8_t channel, int16_t bend);
 void handle_midi_input(void);
+
+// Here's the corrected handle_note_on function with proper visualizer integration:
+
 void handle_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
-  updateMidiDisplay(channel, note);
+    // Only update displays when actually in those modes
+    if (mode == 1 || mode == 3) {
+        updateMidiDisplay(channel, note);
+    }
+    
+    // Only update visualizer when in visualizer modes
+    if ((mode == 5 || mode == 6) && channel >= 1 && channel <= 11) {
+        updateVelocityViz(channel - 1, velocity);
+    }
+    
     // Apply velocity curve for more musical response
     velocity = (int)(pow((float)velocity / 127.0f, 0.17f) * 127.0f);
     
     bool repeatnote = false;
     
-    if (mode == 3 || mode == 4) { // if we're in poly mode
+    if (mode == 3 || mode == 4 || mode == 6) { // if we're in poly mode
         if (channel == midichannel) {  // and is set to the global midi channel
             
             // Handle repeat notes - retrigger if same note is already playing
             for (int i = 0; i <= 5; i++) {
-                if (note == polynote[i]) { // if the incoming note matches one in the array
+                if (note == polynote[i]) {
                     
-                    if (polypan > 64) { // stereo spread mode
+                    if (polypan > 64) {
                         long randpan = random(33, 127);
                         midi_send_cc(i + 1, 77, randpan);
                     }
                     
-                    midi_send_note_off(i + 1, polynote[i], velocity); // turn off that old note
-                    midi_send_note_on(i + 1, note, velocity); // play the new note at that channel
-                    noteheld[i] = true; // the note is still being held
-                    repeatnote = true; // to bypass the rest
+                    midi_send_note_off(i + 1, polynote[i], velocity);
+                    midi_send_note_on(i + 1, note, velocity);
+                    noteheld[i] = true;
+                    repeatnote = true;
                     break;
                 }
-                handle_midi_input(); // Keep MIDI responsive during loops
+                handle_midi_input();
             }
             
             if (!repeatnote) {
@@ -215,44 +237,41 @@ void handle_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
                 // First, look for empty voice slots
                 for (int i = 0; i <= 5; i++) {
                     if (polynote[i] == 0) {
-                        randchannel = i; // use the empty channel
+                        randchannel = i;
                         break;
                     }
                     handle_midi_input();
                 }
                 
-                if (polypan > 64) { // stereo spread mode
+                if (polypan > 64) {
                     long randpan = random(33, 127);
                     midi_send_cc(randchannel + 1, 77, randpan);
                 }
                 
-                // Turn off old note and play new one
                 if (polynote[randchannel] != 0) {
                     midi_send_note_off(randchannel + 1, polynote[randchannel], velocity);
                 }
                 midi_send_note_on(randchannel + 1, note, velocity);
                 
-                // Update voice tracking arrays
                 polynote[randchannel] = note;
                 polyon[randchannel] = true;
                 noteheld[randchannel] = true;
             }
             
-        } // if correct MIDI channel
+        }
     } else {
-        // Mono mode or pass-through - use original behavior
+        // Mono mode or pass-through
         if (channel >= 1 && channel <= 6) {
             polyon[channel-1] = true;
             polynote[channel-1] = note;
             noteheld[channel-1] = true;
             midi_send_note_on(channel, note, velocity);
         } else {
-            // Pass other channels straight through
+            // Pass other channels straight through to GENMDM
             MIDI.sendNoteOn(note, velocity, channel);
         }
     }
 }
-
 void handle_control_change(uint8_t channel, uint8_t cc, uint8_t value) {
     if (cc == 64) { // Sustain pedal
         if (value == 0) { // sustain pedal released
@@ -364,26 +383,55 @@ void loop() {
     
     booted = 1;
     
+    // CRITICAL: Process MIDI first for lowest latency
     handle_midi_input();
-
-      if (last_midi_time > 0 && (millis() - last_midi_time) > midi_display_timeout) {
-        last_midi_time = 0;
-        if (mode == 1 || mode == 3) {
-            updateFileDisplay(); // Refresh to remove MIDI info
+    
+    // Static timers for non-critical updates
+    static unsigned long last_slow_update = 0;
+    static unsigned long last_fast_update = 0;
+    unsigned long current_time = millis();
+    
+    // Fast updates every 20ms (50 FPS max)
+    if (current_time - last_fast_update >= 100) {
+        last_fast_update = current_time;
+        
+        // Only run visualizer animation in visualizer modes
+        if (mode == 5 || mode == 6) {
+            updateVisualizerAnimation();
+        }
+        
+        // Handle cached display updates
+        if (display_needs_refresh && (mode == 1 || mode == 3)) {
+            updateFileDisplay();
         }
     }
     
-    // Check if we need to show "loading..." message after 500ms
-    if (tfi_pending_load && !showing_loading && (millis() - tfi_select_time) > 500) {
-        showing_loading = true;
-        updateFileDisplay(); // Show the "loading tfi..." message
+    // Slow updates every 100ms
+    if (current_time - last_slow_update >= 100) {
+        last_slow_update = current_time;
+        
+        // MIDI display timeout check (non-critical)
+        if (last_midi_time > 0 && (current_time - last_midi_time) > midi_display_timeout) {
+            last_midi_time = 0;
+            if (mode == 1 || mode == 3) {
+                display_needs_refresh = true; // Mark for update instead of immediate
+            }
+        }
     }
     
-    // Check if it's time to load the pending TFI after 2 seconds
-    if (tfi_pending_load && (millis() - tfi_select_time) > 2000) {
+    // TFI loading system (keep at original speed for responsiveness)
+    if (tfi_pending_load && !showing_loading && (current_time - tfi_select_time) > 500) {
+        showing_loading = true;
+        if (mode == 1 || mode == 3) {
+            updateFileDisplay();
+        }
+    }
+    
+    if (tfi_pending_load && (current_time - tfi_select_time) > 2000) {
         loadPendingTFI();
     }
     
+    // Button reading and mode handling (keep responsive)
     lcd_key = read_buttons();
     modechangemessage();
     
@@ -474,66 +522,7 @@ void loop() {
             operatorparamdisplay();
             break;
             
-case 3: // POLY / PRESET
-    switch (lcd_key) {
-        case btnRIGHT:
-            tfichannel = 1;
-            tfifilenumber[tfichannel-1]++;
-            if(tfifilenumber[tfichannel-1] >= n) {
-                tfifilenumber[tfichannel-1] = 0;
-            }
-            for (int i = 1; i <= 5; i++) {
-                tfifilenumber[i] = tfifilenumber[0];
-            }
-            // REMOVED: applyTFIToAllChannelsImmediate(); 
-            // Instead, just start the delay timer:
-            tfi_select_time = millis();
-            tfi_pending_load = true;
-            pending_tfi_channel = 1; // Will apply to all channels when timer expires
-            showing_loading = false;
-            updateFileDisplay();
-            break;
-            
-        case btnLEFT:
-            tfichannel = 1;
-            if(tfifilenumber[tfichannel-1] == 0) {
-                tfifilenumber[tfichannel-1] = n-1;
-            } else {
-                tfifilenumber[tfichannel-1]--;
-            }
-            for (int i = 1; i <= 5; i++) {
-                tfifilenumber[i] = tfifilenumber[0];
-            }
-            // REMOVED: tfiselect(); which was calling immediate load
-            // Instead, just start the delay timer:
-            tfi_select_time = millis();
-            tfi_pending_load = true;
-            pending_tfi_channel = 1; // Will apply to all channels when timer expires
-            showing_loading = false;
-            updateFileDisplay();
-            break;
-            
-        case btnUP:
-            saveprompt();
-            break;
-            
-        case btnDOWN:
-            saveprompt();
-            break;
-            
-        case btnSELECT:
-            modechange(1);
-            break;
-            
-        case btnPOLY:
-            modechange(2);
-            break;
-            
-        case btnBLANK:
-            deletefile();
-            break;
-    }
-    break;
+        case 3: // POLY / PRESET
             switch (lcd_key) {
                 case btnRIGHT:
                     tfichannel = 1;
@@ -544,8 +533,11 @@ case 3: // POLY / PRESET
                     for (int i = 1; i <= 5; i++) {
                         tfifilenumber[i] = tfifilenumber[0];
                     }
-                    // In poly mode, we need to load all channels eventually
-                    applyTFIToAllChannelsImmediate(); // Apply to all 6 channels now
+                    // Start the delay timer:
+                    tfi_select_time = millis();
+                    tfi_pending_load = true;
+                    pending_tfi_channel = 1; // Will apply to all channels when timer expires
+                    showing_loading = false;
                     updateFileDisplay();
                     break;
                     
@@ -559,7 +551,11 @@ case 3: // POLY / PRESET
                     for (int i = 1; i <= 5; i++) {
                         tfifilenumber[i] = tfifilenumber[0];
                     }
-                    tfiselect(); // This will start the timer for channel 1
+                    // Start the delay timer:
+                    tfi_select_time = millis();
+                    tfi_pending_load = true;
+                    pending_tfi_channel = 1; // Will apply to all channels when timer expires
+                    showing_loading = false;
                     updateFileDisplay();
                     break;
                     
@@ -616,6 +612,19 @@ case 3: // POLY / PRESET
                     break;
             }
             operatorparamdisplay();
+            break;
+
+        case 5: // MONO / VISUALIZER
+        case 6: // POLY / VISUALIZER
+            switch (lcd_key) {
+                case btnSELECT:
+                    modechange(1);
+                    break;
+                    
+                case btnPOLY:
+                    modechange(2);
+                    break;
+            }
             break;
     }
 }
@@ -1078,12 +1087,16 @@ void modechange(int modetype) {
     
     if (mode == 1 && modetype == 1) { mode = 2; quickswitch = true; }
     else if (mode == 1 && modetype == 2) mode = 3;
-    else if (mode == 2 && modetype == 1) { mode = 1; quickswitch = true; }
+    else if (mode == 2 && modetype == 1) { mode = 5; quickswitch = true; }  // MONO EDIT -> MONO VIZ
     else if (mode == 2 && modetype == 2) mode = 4;
     else if (mode == 3 && modetype == 1) { mode = 4; quickswitch = true; }
     else if (mode == 3 && modetype == 2) mode = 1;
-    else if (mode == 4 && modetype == 1) { mode = 3; quickswitch = true; }
+    else if (mode == 4 && modetype == 1) { mode = 6; quickswitch = true; }  // POLY EDIT -> POLY VIZ
     else if (mode == 4 && modetype == 2) mode = 2;
+    else if (mode == 5 && modetype == 1) { mode = 1; quickswitch = true; }  // MONO VIZ -> MONO PRESET
+    else if (mode == 5 && modetype == 2) mode = 6;
+    else if (mode == 6 && modetype == 1) { mode = 3; quickswitch = true; }  // POLY VIZ -> POLY PRESET
+    else if (mode == 6 && modetype == 2) mode = 5;
     
     switch(mode) {
         case 1:
@@ -1098,11 +1111,10 @@ void modechange(int modetype) {
             break;
             
         case 2:
-            // Find out where ALL 4 pots are
             prevpotvalue[0] = analogRead(POT_OP1_PIN) >> 5;
             prevpotvalue[1] = analogRead(POT_OP2_PIN) >> 5;
             prevpotvalue[2] = analogRead(POT_OP3_PIN) >> 5;
-            prevpotvalue[3] = analogRead(POT_OP4_PIN) >> 5;  // READ 4TH POT
+            prevpotvalue[3] = analogRead(POT_OP4_PIN) >> 5;
             
             messagestart = millis();
             oled_clear();
@@ -1126,11 +1138,10 @@ void modechange(int modetype) {
             break;
             
         case 4:
-            // Find out where ALL 4 pots are
             prevpotvalue[0] = analogRead(POT_OP1_PIN) >> 5;
             prevpotvalue[1] = analogRead(POT_OP2_PIN) >> 5;
             prevpotvalue[2] = analogRead(POT_OP3_PIN) >> 5;
-            prevpotvalue[3] = analogRead(POT_OP4_PIN) >> 5;  // READ 4TH POT
+            prevpotvalue[3] = analogRead(POT_OP4_PIN) >> 5;
             
             messagestart = millis();
             oled_clear();
@@ -1139,6 +1150,28 @@ void modechange(int modetype) {
                 refreshscreen = 1;
             } else {
                 fmparamdisplay();
+            }
+            break;
+            
+        case 5: // MONO VISUALIZER
+            messagestart = millis();
+            oled_clear();
+            if (!quickswitch) {
+                oled_print(0, 0, "MONO | Visualizer");
+                refreshscreen = 1;
+            } else {
+                visualizerDisplay();
+            }
+            break;
+            
+        case 6: // POLY VISUALIZER
+            messagestart = millis();
+            oled_clear();
+            if (!quickswitch) {
+                oled_print(0, 0, "POLY | Visualizer");
+                refreshscreen = 1;
+            } else {
+                visualizerDisplay();
             }
             break;
     }
@@ -1164,8 +1197,132 @@ void modechangemessage(void) {
                 fmparamdisplay();
                 refreshscreen = 0;
                 break;
+            case 5: // MONO VISUALIZER
+                visualizerDisplay();
+                refreshscreen = 0;
+                break;
+            case 6: // POLY VISUALIZER
+                visualizerDisplay();
+                refreshscreen = 0;
+                break;
         }
     }
+}
+
+
+// Update velocity visualization when notes are played:
+void updateVelocityViz(uint8_t channel, uint8_t velocity) {
+    if (channel >= 11) return;  // Support channels 0-10 (MIDI channels 1-11)
+    
+    voice_velocity[channel] = velocity;
+    
+    // Update peak hold if this velocity is higher
+    if (velocity > voice_peak[channel]) {
+        voice_peak[channel] = velocity;
+        voice_peak_time[channel] = millis();
+    }
+}
+
+void clearVelocityViz(uint8_t channel) {
+    if (channel >= 11) return;
+    voice_velocity[channel] = 0;
+}
+
+void updateVisualizerAnimation(void) {
+    // Only run if in visualizer mode
+    if (mode != 5 && mode != 6) return;
+    
+    static unsigned long last_update = 0;
+    unsigned long current_time = millis();
+    
+    // Reduce update frequency to 15 FPS for better performance
+    if (current_time - last_update < 67) return;
+    last_update = current_time;
+    
+    bool needs_update = false;
+    
+    // Decay all 11 channels
+    for (int channel = 0; channel < 11; channel++) {
+        if (voice_velocity[channel] > 0) {
+            if (voice_velocity[channel] > velocity_decay_rate) {
+                voice_velocity[channel] -= velocity_decay_rate;
+            } else {
+                voice_velocity[channel] = 0;
+            }
+            needs_update = true;
+        }
+        
+        // Clear peak hold after timeout
+        if (voice_peak[channel] > 0 && 
+            (current_time - voice_peak_time[channel]) > peak_hold_duration) {
+            voice_peak[channel] = 0;
+            needs_update = true;
+        }
+    }
+    
+    if (needs_update) {
+        visualizerDisplay();
+    }
+}
+
+// Optimized visualizer display function with faster rendering:
+void visualizerDisplay(void) {
+    display.clearDisplay();
+    
+    // Draw title
+    display.setCursor(0, 0);
+    display.setTextSize(1);
+    if (mode == 5) {
+        display.print("MONO VIZ - 11CH");
+    } else {
+        display.print("POLY VIZ - 11CH");
+    }
+    
+    // Draw 11 channels across 128 pixels (11.6 pixels per channel)
+    for (int channel = 0; channel < 11; channel++) {
+        int x_start = channel * 11 + channel;  // 11 pixels + 1 spacing = 12 total per channel
+        int bar_width = 10;                    // Narrow bars to fit 11 channels
+        int bar_height = 16;                   // Shorter bars to fit labels
+        int y_base = 31;                       // Bottom of screen
+        
+        // Calculate bar heights
+        int current_bar = map(voice_velocity[channel], 0, 127, 0, bar_height);
+        int peak_bar = map(voice_peak[channel], 0, 127, 0, bar_height);
+        
+        // Draw main velocity bar
+        if (current_bar > 0) {
+            display.fillRect(x_start, y_base - current_bar, bar_width, current_bar, SSD1306_WHITE);
+        }
+        
+        // Draw peak hold line
+        if (voice_peak[channel] > 0) {
+            display.drawFastHLine(x_start, y_base - peak_bar, bar_width, SSD1306_WHITE);
+        }
+        
+        // Draw channel labels at bottom (very small text)
+        display.setCursor(x_start + 2, 10);
+        display.setTextSize(1);
+        
+        // Compact channel labels
+        if (channel < 6) {
+            display.print(channel + 1);  // FM channels: 1, 2, 3, 4, 5, 6
+        } else if (channel < 10) {
+            display.print("P");           // PSG channels: P, P, P, P (channels 7-10)
+            display.setCursor(x_start + 2, 18);
+            display.print(channel - 6);  // P1, P2, P3, P4
+        } else {
+            display.print("N");           // PSG Noise channel: N (channel 11)
+        }
+    }
+    
+    display.display();
+}
+
+
+void switchVisualizerPage(void) {
+    static uint8_t viz_page = 0;
+    viz_page = !viz_page;
+    visualizerDisplay();
 }
 
 void bootprompt(void) {
@@ -1600,6 +1757,15 @@ void updateMidiDisplay(uint8_t channel, uint8_t note) {
 void updateFileDisplay(void) {
     if (n == 0) return;
     
+    // Only update if we're in a file browsing mode
+    if (mode != 1 && mode != 3) return;
+    
+    // Rate limit display updates to reduce OLED overhead
+    if (millis() - last_display_update < 50) {
+        display_needs_refresh = true; // Mark for later update
+        return;
+    }
+    
     // Show filename on screen
     char display_buffer[32];
     if (mode == 3) {
@@ -1611,14 +1777,14 @@ void updateFileDisplay(void) {
     oled_clear();
     oled_print(0, 0, display_buffer);
     
-    // Add MIDI info to top right if recent MIDI activity
-    if (last_midi_time > 0 && (millis() - last_midi_time) < midi_display_timeout) {
+    // Add MIDI info only if recent and in correct modes
+    if (last_midi_time > 0 && (millis() - last_midi_time) < midi_display_timeout && (mode == 1 || mode == 3)) {
         char midi_buffer[16];
         char note_name[8];
         
         midiNoteToString(last_midi_note, note_name);
         sprintf(midi_buffer, "C%d %s", last_midi_channel, note_name);
-        oled_print(75, 0, midi_buffer); // Moved left slightly to fit note names
+        oled_print(75, 0, midi_buffer);
     }
     
     oled_print(0, 16, filenames[tfifilenumber[tfichannel-1]]);
@@ -1627,11 +1793,13 @@ void updateFileDisplay(void) {
     if (showing_loading) {
         oled_print(0, 24, "loading tfi...");
     }
-    showAccelerationFeedback();
     
+    showAccelerationFeedback();
     oled_refresh();
+    
+    last_display_update = millis();
+    display_needs_refresh = false;
 }
-
 void midiNoteToStringShort(uint8_t note, char* noteStr) {
     const char* noteNames[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
     
@@ -2244,40 +2412,43 @@ void handle_midi_input(void) {
     MIDI.read();
 }
 
-
+// Corrected handle_note_off function:
 
 void handle_note_off(uint8_t channel, uint8_t note, uint8_t velocity) {
-    if (mode == 3 || mode == 4) { // if we're in poly mode
-        if (channel == midichannel) {  // and is set to the global midi channel
+    // Only clear visualizer when in visualizer modes
+    if ((mode == 5 || mode == 6) && channel >= 1 && channel <= 11) {
+        clearVelocityViz(channel - 1);
+    }
+    
+    // Rest of existing note-off logic unchanged...
+    if (mode == 3 || mode == 4 || mode == 6) {
+        if (channel == midichannel) {
             
-            // Find which voice is playing this note
             for (int i = 0; i <= 5; i++) {
                 handle_midi_input();
-                if (note == polynote[i]) { // if the pitch matches the note being released
+                if (note == polynote[i]) {
                     
-                    if (sustain) { // if the sustain pedal is held
-                        sustainon[i] = true; // turn on sustain on that channel
-                        noteheld[i] = false; // the key is no longer being held down
+                    if (sustain) {
+                        sustainon[i] = true;
+                        noteheld[i] = false;
                         break;
                     } else {
-                        midi_send_note_off(i + 1, note, velocity); // turn that voice off
-                        polyon[i] = false; // turn voice off
-                        polynote[i] = 0; // clear the pitch on that channel
-                        noteheld[i] = false; // the key is no longer being held down
+                        midi_send_note_off(i + 1, note, velocity);
+                        polyon[i] = false;
+                        polynote[i] = 0;
+                        noteheld[i] = false;
                         break;
                     }
                 }
             }
             
-            // Count active notes for display feedback
             notecounter = 0;
             for (int i = 0; i <= 5; i++) {
                 if (noteheld[i]) notecounter++;
             }
             
-        } // if correct MIDI channel
+        }
     } else {
-        // Mono mode or pass-through - use original behavior
         if (channel >= 1 && channel <= 6) {
             if (sustain && sustainon[channel-1]) {
                 noteheld[channel-1] = false;
@@ -2287,11 +2458,11 @@ void handle_note_off(uint8_t channel, uint8_t note, uint8_t velocity) {
             noteheld[channel-1] = false;
             midi_send_note_off(channel, note, velocity);
         } else {
-            // Pass other channels straight through
             MIDI.sendNoteOff(note, velocity, channel);
         }
     }
 }
+
 
 void handle_pitch_bend(uint8_t channel, int16_t bend) {
     if (mode == 3 || mode == 4) { // if we're in poly mode
