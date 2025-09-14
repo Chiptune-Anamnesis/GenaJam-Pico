@@ -1,4 +1,4 @@
-// GENajam v1.16 Arduino Pico Port - Crunchypotato 2025-SEPTEMBER
+// GENajam v1.17 Arduino Pico Port - Crunchypotato 2025-SEPTEMBER
 // Ported from Arduino Mega 2560 version
 // originally by/forked from JAMATAR 2021-AUGUST
 // --------------------
@@ -37,6 +37,7 @@ MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
 #define BTN_CH_DOWN_PIN 17
 #define BTN_MONO_POLY_PIN 18
 #define BTN_DELETE_PIN 19
+#define BTN_FUTURE_PIN 22
 
 // Display dimensions and setup
 #define OLED_WIDTH 128
@@ -636,7 +637,7 @@ void setup_oled(void) {
     display.setCursor(0, 0);
     display.print("JamaGEN START!");
     display.setCursor(0, 16);
-    display.print("ver Pico 1.16");
+    display.print("ver Pico 1.17");
     display.display();
     delay(1000);
 }
@@ -662,7 +663,8 @@ void setup_hardware(void) {
     pinMode(BTN_CH_DOWN_PIN, INPUT_PULLUP);
     pinMode(BTN_MONO_POLY_PIN, INPUT_PULLUP);
     pinMode(BTN_DELETE_PIN, INPUT_PULLUP);
-    pinMode(BTN_PANIC_PIN, INPUT_PULLUP);  // ADD THIS LINE
+    pinMode(BTN_PANIC_PIN, INPUT_PULLUP); 
+    pinMode(BTN_FUTURE_PIN, INPUT_PULLUP);
     
     // Read initial pot values - NOW ALL 4 POTS
     prevpotvalue[0] = analogRead(POT_OP1_PIN) >> 5;
@@ -781,7 +783,6 @@ void showAccelerationFeedback(void) {
     // Add acceleration indicator to display
     if (hold_duration > hold_threshold_2) {
         // Show turbo indicator (could be added to updateFileDisplay)
-        // This is optional visual feedback
         oled_print(120, 0, ">>>");
     } else if (hold_duration > hold_threshold_1) {
         // Show fast indicator
@@ -804,7 +805,8 @@ uint8_t read_buttons(void) {
     bool select_pressed = !digitalRead(BTN_PRESET_PIN);
     bool poly_pressed = !digitalRead(BTN_MONO_POLY_PIN);
     bool delete_pressed = !digitalRead(BTN_DELETE_PIN);
-    bool panic_pressed = !digitalRead(BTN_PANIC_PIN);  // ADD THIS LINE
+    bool panic_pressed = !digitalRead(BTN_PANIC_PIN);
+    bool future_pressed = !digitalRead(BTN_FUTURE_PIN);
     
     // Check for panic button first (highest priority)
     if (panic_pressed) {
@@ -825,7 +827,7 @@ uint8_t read_buttons(void) {
     else if (poly_pressed) current_button = btnPOLY;
     else if (delete_pressed) current_button = btnBLANK;
     
-    // Rest of button handling logic unchanged...
+
     if (current_button == btnLEFT || current_button == btnRIGHT) {
         if (!button_is_held || last_held_button != current_button) {
             button_hold_start_time = current_time;
@@ -1186,7 +1188,6 @@ void bootprompt(void) {
         midichannel = (currentpotvalue[0] / 8) + 1;
         uint8_t currentRegion = (currentpotvalue[3] < 64) ? 0 : 1;
         
-        // FIXED: Only update display when values actually change
         if (midichannel != lastDisplayedChannel || currentRegion != lastDisplayedRegion) {
             char buffer[32];
             sprintf(buffer, "CH:%d", midichannel);
@@ -1201,7 +1202,7 @@ void bootprompt(void) {
                 oled_print(80, 16, " PAL");
                 midi_send_cc(1, 83, 1);
             }
-            oled_refresh(); // ONLY UPDATE WHEN VALUES CHANGE
+            oled_refresh(); 
             
             lastDisplayedChannel = midichannel;
             lastDisplayedRegion = currentRegion;
@@ -1495,7 +1496,7 @@ void tfiselect(void) {
     if (mode == 1 || mode == 2) {
         tfiLoadImmediateOnChannel(tfichannel); // applies to current tfichannel
         updateFileDisplay();
-        tfi_pending_load = false;   // we've already applied it
+        tfi_pending_load = false;  
         showing_loading = false;
     } else {
         // In POLY modes, just update display now; delayed loader will show UI and apply
@@ -1626,14 +1627,11 @@ void updateFileDisplay(void) {
     if (showing_loading) {
         oled_print(0, 24, "loading tfi...");
     }
-    
-    // Optional: Show acceleration feedback
     showAccelerationFeedback();
     
     oled_refresh();
 }
 
-// Alternative shorter format if screen space is tight:
 void midiNoteToStringShort(uint8_t note, char* noteStr) {
     const char* noteNames[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
     
@@ -1647,7 +1645,6 @@ void midiNoteToStringShort(uint8_t note, char* noteStr) {
     }
 }
 
-// If you want even more compact display, you could show just the note without octave:
 void midiNoteToStringNoOctave(uint8_t note, char* noteStr) {
     const char* noteNames[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
     
@@ -1951,7 +1948,7 @@ void operatorparamdisplay(void) {
     currentpotvalue[0] = analogRead(POT_OP1_PIN) >> 5;
     currentpotvalue[1] = analogRead(POT_OP2_PIN) >> 5;
     currentpotvalue[2] = analogRead(POT_OP3_PIN) >> 5;
-    currentpotvalue[3] = analogRead(POT_OP4_PIN) >> 5;  // NOW READS 4TH POT
+    currentpotvalue[3] = analogRead(POT_OP4_PIN) >> 5;  
     
     bool displayNeedsUpdate = false;
     
@@ -1998,7 +1995,6 @@ void fmccsend(uint8_t potnumber, uint8_t potvalue) {
                 fmsettings[tfichannel-1][1] = potvalue; 
                 midi_send_cc(tfichannel, 15, potvalue); 
             } // Feedback
-            // NEW: 4th pot can control something else on this screen
             if (potnumber == 3) {
                 // Could control LFO speed or another global parameter
                 lfospeed = potvalue;
@@ -2015,7 +2011,7 @@ void fmccsend(uint8_t potnumber, uint8_t potvalue) {
             }
             break;
             
-        case 2: // Total Level (OP Volume) - NOW ALL 4 OPERATORS
+        case 2: // Total Level (OP Volume) 
             if (potnumber == 0) { 
                 fmsettings[tfichannel-1][4] = potvalue; 
                 midi_send_cc(tfichannel, 16, potvalue); 
@@ -2031,10 +2027,10 @@ void fmccsend(uint8_t potnumber, uint8_t potvalue) {
             if (potnumber == 3) { 
                 fmsettings[tfichannel-1][34] = potvalue; 
                 midi_send_cc(tfichannel, 19, potvalue); 
-            } // OP4 - NOW CONTROLLED BY 4TH POT
+            } // OP4
             break;
             
-        case 3: // Multiplier - NOW ALL 4 OPERATORS
+        case 3: // Multiplier 
             if (potnumber == 0) { 
                 fmsettings[tfichannel-1][2] = potvalue; 
                 midi_send_cc(tfichannel, 20, potvalue); 
@@ -2050,10 +2046,10 @@ void fmccsend(uint8_t potnumber, uint8_t potvalue) {
             if (potnumber == 3) { 
                 fmsettings[tfichannel-1][32] = potvalue; 
                 midi_send_cc(tfichannel, 23, potvalue); 
-            } // OP4 - NOW CONTROLLED BY 4TH POT
+            } // OP4
             break;
             
-        case 4: // Detune - NOW ALL 4 OPERATORS
+        case 4: // Detune
             if (potnumber == 0) { 
                 fmsettings[tfichannel-1][3] = potvalue; 
                 midi_send_cc(tfichannel, 24, potvalue); 
@@ -2069,10 +2065,10 @@ void fmccsend(uint8_t potnumber, uint8_t potvalue) {
             if (potnumber == 3) { 
                 fmsettings[tfichannel-1][33] = potvalue; 
                 midi_send_cc(tfichannel, 27, potvalue); 
-            } // OP4 - NOW CONTROLLED BY 4TH POT
+            } // OP4
             break;
             
-        case 5: // Rate Scaling - NOW ALL 4 OPERATORS
+        case 5: // Rate Scaling 
             if (potnumber == 0) { 
                 fmsettings[tfichannel-1][5] = potvalue; 
                 midi_send_cc(tfichannel, 39, potvalue); 
@@ -2088,10 +2084,10 @@ void fmccsend(uint8_t potnumber, uint8_t potvalue) {
             if (potnumber == 3) { 
                 fmsettings[tfichannel-1][35] = potvalue; 
                 midi_send_cc(tfichannel, 42, potvalue); 
-            } // OP4 - NOW CONTROLLED BY 4TH POT
+            } // OP4
             break;
             
-        case 6: // Attack Rate - NOW ALL 4 OPERATORS
+        case 6: // Attack Rate
             if (potnumber == 0) { 
                 fmsettings[tfichannel-1][6] = potvalue; 
                 midi_send_cc(tfichannel, 43, potvalue); 
@@ -2107,10 +2103,10 @@ void fmccsend(uint8_t potnumber, uint8_t potvalue) {
             if (potnumber == 3) { 
                 fmsettings[tfichannel-1][36] = potvalue; 
                 midi_send_cc(tfichannel, 46, potvalue); 
-            } // OP4 - NOW CONTROLLED BY 4TH POT
+            } // OP4
             break;
             
-        case 7: // Decay Rate 1 - NOW ALL 4 OPERATORS
+        case 7: // Decay Rate 1
             if (potnumber == 0) { 
                 fmsettings[tfichannel-1][7] = potvalue; 
                 midi_send_cc(tfichannel, 47, potvalue); 
@@ -2126,10 +2122,10 @@ void fmccsend(uint8_t potnumber, uint8_t potvalue) {
             if (potnumber == 3) { 
                 fmsettings[tfichannel-1][37] = potvalue; 
                 midi_send_cc(tfichannel, 50, potvalue); 
-            } // OP4 - NOW CONTROLLED BY 4TH POT
+            } // OP4
             break;
             
-        case 8: // Sustain (2nd Total Level) - NOW ALL 4 OPERATORS
+        case 8: // Sustain (2nd Total Level) 
             if (potnumber == 0) { 
                 fmsettings[tfichannel-1][10] = 127 - potvalue; 
                 midi_send_cc(tfichannel, 55, 127 - potvalue); 
@@ -2145,10 +2141,10 @@ void fmccsend(uint8_t potnumber, uint8_t potvalue) {
             if (potnumber == 3) { 
                 fmsettings[tfichannel-1][40] = 127 - potvalue; 
                 midi_send_cc(tfichannel, 58, 127 - potvalue); 
-            } // OP4 - NOW CONTROLLED BY 4TH POT
+            } // OP4
             break;
             
-        case 9: // Decay Rate 2 - NOW ALL 4 OPERATORS
+        case 9: // Decay Rate 2 
             if (potnumber == 0) { 
                 fmsettings[tfichannel-1][8] = potvalue; 
                 midi_send_cc(tfichannel, 51, potvalue); 
@@ -2164,10 +2160,10 @@ void fmccsend(uint8_t potnumber, uint8_t potvalue) {
             if (potnumber == 3) { 
                 fmsettings[tfichannel-1][38] = potvalue; 
                 midi_send_cc(tfichannel, 54, potvalue); 
-            } // OP4 - NOW CONTROLLED BY 4TH POT
+            } // OP4
             break;
             
-        case 10: // Release Rate - NOW ALL 4 OPERATORS
+        case 10: // Release Rate
             if (potnumber == 0) { 
                 fmsettings[tfichannel-1][9] = potvalue; 
                 midi_send_cc(tfichannel, 59, potvalue); 
@@ -2183,10 +2179,10 @@ void fmccsend(uint8_t potnumber, uint8_t potvalue) {
             if (potnumber == 3) { 
                 fmsettings[tfichannel-1][39] = potvalue; 
                 midi_send_cc(tfichannel, 62, potvalue); 
-            } // OP4 - NOW CONTROLLED BY 4TH POT
+            } // OP4
             break;
             
-        case 11: // SSG-EG - NOW ALL 4 OPERATORS
+        case 11: // SSG-EG
             if (potnumber == 0) { 
                 fmsettings[tfichannel-1][11] = potvalue; 
                 midi_send_cc(tfichannel, 90, potvalue); 
@@ -2202,10 +2198,10 @@ void fmccsend(uint8_t potnumber, uint8_t potvalue) {
             if (potnumber == 3) { 
                 fmsettings[tfichannel-1][41] = potvalue; 
                 midi_send_cc(tfichannel, 93, potvalue); 
-            } // OP4 - NOW CONTROLLED BY 4TH POT
+            } // OP4
             break;
             
-        case 12: // Amp Mod - NOW ALL 4 OPERATORS
+        case 12: // Amp Mod
             if (potnumber == 0) { 
                 fmsettings[tfichannel-1][45] = potvalue; 
                 midi_send_cc(tfichannel, 70, potvalue); 
@@ -2221,7 +2217,7 @@ void fmccsend(uint8_t potnumber, uint8_t potvalue) {
             if (potnumber == 3) { 
                 fmsettings[tfichannel-1][48] = potvalue; 
                 midi_send_cc(tfichannel, 73, potvalue); 
-            } // OP4 - NOW CONTROLLED BY 4TH POT
+            } // OP4
             break;
             
         case 13: // LFO/FM/AM Level
@@ -2238,7 +2234,6 @@ void fmccsend(uint8_t potnumber, uint8_t potvalue) {
                 midi_send_cc(tfichannel, 76, potvalue); 
             } // AM Level
             if (potnumber == 3) {
-                // 4th pot could control channel volume or another parameter
                 midi_send_cc(tfichannel, 7, potvalue); // Channel Volume
             }
             break;
