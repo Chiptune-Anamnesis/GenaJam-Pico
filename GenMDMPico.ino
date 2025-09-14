@@ -280,6 +280,7 @@ void handle_control_change(uint8_t channel, uint8_t cc, uint8_t value) {
         }
     }
     
+    // ADD THIS: Modulation wheel handling (same as original)
     if (cc == 1) { // Modulation wheel
         if (value <= 5) {
             midi_send_cc(1, 74, 0); // mod wheel below 5 turns off LFO
@@ -2280,11 +2281,19 @@ void handle_note_off(uint8_t channel, uint8_t note, uint8_t velocity) {
 }
 
 void handle_pitch_bend(uint8_t channel, int16_t bend) {
-    if (channel >= 1 && channel <= 6) {
-        midi_send_pitch_bend(channel, bend);
-    } else {
-        // Pass other channels straight through
-        MIDI.sendPitchBend(bend, channel);
+    if (mode == 3 || mode == 4) { // if we're in poly mode
+        // Send pitch bend to all 6 FM channels (like the original)
+        for (int i = 1; i <= 6; i++) {
+            midi_send_pitch_bend(i, bend);
+            handle_midi_input(); // Keep MIDI responsive during loops
+        }
+    } else { // mono mode
+        if (channel >= 1 && channel <= 6) {
+            midi_send_pitch_bend(channel, bend);
+        } else {
+            // Pass other channels straight through
+            MIDI.sendPitchBend(bend, channel);
+        }
     }
 }
 
