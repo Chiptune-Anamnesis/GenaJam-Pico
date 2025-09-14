@@ -93,6 +93,10 @@ uint8_t tfichannel = 1;
 uint8_t mode = 3;
 uint8_t region = 0;
 uint8_t midichannel = 1;
+uint8_t last_midi_channel = 0;
+uint8_t last_midi_note = 0;
+unsigned long last_midi_time = 0;
+const uint16_t midi_display_timeout = 2000;
 
 // Polyphony settings
 uint8_t polynote[6] = {0, 0, 0, 0, 0, 0};
@@ -100,6 +104,8 @@ bool polyon[6] = {0, 0, 0, 0, 0, 0};
 bool sustainon[6] = {0, 0, 0, 0, 0, 0};
 bool noteheld[6] = {0, 0, 0, 0, 0, 0};
 bool sustain = 0;
+uint8_t lowestnote = 0;      // Add this back - needed for voice stealing
+uint8_t notecounter = 0;     // Add this back - needed for note counting
 
 // FM parameter screen navigation
 uint8_t fmscreen = 1;
@@ -158,35 +164,148 @@ void midi_send_note_off(uint8_t channel, uint8_t note, uint8_t velocity);
 void midi_send_pitch_bend(uint8_t channel, int16_t bend);
 void handle_midi_input(void);
 void handle_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
-    if (channel >= 1 && channel <= 6) {
-        polyon[channel-1] = true;
-        polynote[channel-1] = note;
-        noteheld[channel-1] = true;
-        midi_send_note_on(channel, note, velocity);
+  updateMidiDisplay(channel, note);
+    // Apply velocity curve for more musical response
+    velocity = (int)(pow((float)velocity / 127.0f, 0.17f) * 127.0f);
+    
+    bool repeatnote = false;
+    
+    if (mode == 3 || mode == 4) { // if we're in poly mode
+        if (channel == midichannel) {  // and is set to the global midi channel
+            
+            // Handle repeat notes - retrigger if same note is already playing
+            for (int i = 0; i <= 5; i++) {
+                if (note == polynote[i]) { // if the incoming note matches one in the array
+                    
+                    if (polypan > 64) { // stereo spread mode
+                        long randpan = random(33, 127);
+                        midi_send_cc(i + 1, 77, randpan);
+                    }
+                    
+                    midi_send_note_off(i + 1, polynote[i], velocity); // turn off that old note
+                    midi_send_note_on(i + 1, note, velocity); // play the new note at that channel
+                    noteheld[i] = true; // the note is still being held
+                    repeatnote = true; // to bypass the rest
+                    break;
+                }
+                handle_midi_input(); // Keep MIDI responsive during loops
+            }
+            
+            if (!repeatnote) {
+                // Find the lowest note to protect it from voice stealing
+                lowestnote = polynote[0];
+                for (int i = 0; i <= 5; i++) {
+                    if (polynote[i] < lowestnote && polynote[i] != 0) {
+                        lowestnote = polynote[i];
+                    }
+                    handle_midi_input();
+                }
+                
+                // Pick a random channel for voice stealing
+                long randchannel = random(0, 6);
+                
+                // Don't steal the lowest note
+                if (polynote[randchannel] == lowestnote) {
+                    randchannel++;
+                    if (randchannel == 6) randchannel = 0;
+                }
+                
+                // First, look for empty voice slots
+                for (int i = 0; i <= 5; i++) {
+                    if (polynote[i] == 0) {
+                        randchannel = i; // use the empty channel
+                        break;
+                    }
+                    handle_midi_input();
+                }
+                
+                if (polypan > 64) { // stereo spread mode
+                    long randpan = random(33, 127);
+                    midi_send_cc(randchannel + 1, 77, randpan);
+                }
+                
+                // Turn off old note and play new one
+                if (polynote[randchannel] != 0) {
+                    midi_send_note_off(randchannel + 1, polynote[randchannel], velocity);
+                }
+                midi_send_note_on(randchannel + 1, note, velocity);
+                
+                // Update voice tracking arrays
+                polynote[randchannel] = note;
+                polyon[randchannel] = true;
+                noteheld[randchannel] = true;
+            }
+            
+        } // if correct MIDI channel
     } else {
-        // Pass other channels straight through
-        MIDI.sendNoteOn(note, velocity, channel);
+        // Mono mode or pass-through - use original behavior
+        if (channel >= 1 && channel <= 6) {
+            polyon[channel-1] = true;
+            polynote[channel-1] = note;
+            noteheld[channel-1] = true;
+            midi_send_note_on(channel, note, velocity);
+        } else {
+            // Pass other channels straight through
+            MIDI.sendNoteOn(note, velocity, channel);
+        }
     }
 }
+
 void handle_control_change(uint8_t channel, uint8_t cc, uint8_t value) {
-    if (channel >= 1 && channel <= 6) {
-        if (cc == 64) {
-            if (value >= 64) {
-                sustain = true;
-                sustainon[channel-1] = true;
-            } else {
-                sustainon[channel-1] = false;
-                if (!noteheld[channel-1] && polyon[channel-1]) {
-                    midi_send_note_off(channel, polynote[channel-1], 0);
-                    polyon[channel-1] = false;
+    if (cc == 64) { // Sustain pedal
+        if (value == 0) { // sustain pedal released
+            sustain = false;
+            
+            if (mode == 3 || mode == 4) { // poly mode
+                for (int i = 5; i >= 0; i--) { // scan for sustained channels
+                    handle_midi_input();
+                    if (!noteheld[i] && sustainon[i]) { // if key not held but sustained
+                        midi_send_note_off(i + 1, polynote[i], 0); // turn that voice off
+                        sustainon[i] = false; // turn off sustain on that channel
+                        polyon[i] = false; // turn voice off
+                        polynote[i] = 0; // clear the pitch on that channel
+                    }
                 }
-                sustain = false;
+            } else { // mono mode
+                for (int i = 0; i < 6; i++) {
+                    sustainon[i] = false;
+                    if (!noteheld[i] && polyon[i]) {
+                        midi_send_note_off(i + 1, polynote[i], 0);
+                        polyon[i] = false;
+                    }
+                }
             }
+        } else { // sustain pedal pressed
+            sustain = true;
         }
-        midi_send_cc(channel, cc, value);
-    } else {
-        // Pass other channels straight through
-        MIDI.sendControlChange(cc, value, channel);
+    }
+    
+    if (cc == 1) { // Modulation wheel
+        if (value <= 5) {
+            midi_send_cc(1, 74, 0); // mod wheel below 5 turns off LFO
+        } else {
+            midi_send_cc(1, 74, 70); // mod wheel above 5 turns on LFO
+        }
+    }
+    
+    // Pass CC messages to appropriate channels
+    if (mode == 3 || mode == 4) { // poly mode
+        if (channel == midichannel) {
+            // Send CC to all active FM channels in poly mode
+            for (int i = 1; i <= 6; i++) {
+                midi_send_cc(i, cc, value);
+            }
+        } else {
+            // Pass other channels straight through
+            MIDI.sendControlChange(cc, value, channel);
+        }
+    } else { // mono mode
+        if (channel >= 1 && channel <= 6) {
+            midi_send_cc(channel, cc, value);
+        } else {
+            // Pass other channels straight through
+            MIDI.sendControlChange(cc, value, channel);
+        }
     }
 }
 
@@ -243,15 +362,22 @@ void loop() {
     booted = 1;
     
     handle_midi_input();
+
+      if (last_midi_time > 0 && (millis() - last_midi_time) > midi_display_timeout) {
+        last_midi_time = 0;
+        if (mode == 1 || mode == 3) {
+            updateFileDisplay(); // Refresh to remove MIDI info
+        }
+    }
     
-    // Check if we need to show "loading..." message
-    if (tfi_pending_load && !showing_loading && (millis() - tfi_select_time) > 1000) {
+    // Check if we need to show "loading..." message after 500ms
+    if (tfi_pending_load && !showing_loading && (millis() - tfi_select_time) > 500) {
         showing_loading = true;
         updateFileDisplay(); // Show the "loading tfi..." message
     }
     
-    // Check if it's time to load the pending TFI
-    if (tfi_pending_load && (millis() - tfi_select_time) > 3000) {
+    // Check if it's time to load the pending TFI after 2 seconds
+    if (tfi_pending_load && (millis() - tfi_select_time) > 2000) {
         loadPendingTFI();
     }
     
@@ -345,7 +471,66 @@ void loop() {
             operatorparamdisplay();
             break;
             
-        case 3: // POLY / PRESET
+case 3: // POLY / PRESET
+    switch (lcd_key) {
+        case btnRIGHT:
+            tfichannel = 1;
+            tfifilenumber[tfichannel-1]++;
+            if(tfifilenumber[tfichannel-1] >= n) {
+                tfifilenumber[tfichannel-1] = 0;
+            }
+            for (int i = 1; i <= 5; i++) {
+                tfifilenumber[i] = tfifilenumber[0];
+            }
+            // REMOVED: applyTFIToAllChannelsImmediate(); 
+            // Instead, just start the delay timer:
+            tfi_select_time = millis();
+            tfi_pending_load = true;
+            pending_tfi_channel = 1; // Will apply to all channels when timer expires
+            showing_loading = false;
+            updateFileDisplay();
+            break;
+            
+        case btnLEFT:
+            tfichannel = 1;
+            if(tfifilenumber[tfichannel-1] == 0) {
+                tfifilenumber[tfichannel-1] = n-1;
+            } else {
+                tfifilenumber[tfichannel-1]--;
+            }
+            for (int i = 1; i <= 5; i++) {
+                tfifilenumber[i] = tfifilenumber[0];
+            }
+            // REMOVED: tfiselect(); which was calling immediate load
+            // Instead, just start the delay timer:
+            tfi_select_time = millis();
+            tfi_pending_load = true;
+            pending_tfi_channel = 1; // Will apply to all channels when timer expires
+            showing_loading = false;
+            updateFileDisplay();
+            break;
+            
+        case btnUP:
+            saveprompt();
+            break;
+            
+        case btnDOWN:
+            saveprompt();
+            break;
+            
+        case btnSELECT:
+            modechange(1);
+            break;
+            
+        case btnPOLY:
+            modechange(2);
+            break;
+            
+        case btnBLANK:
+            deletefile();
+            break;
+    }
+    break;
             switch (lcd_key) {
                 case btnRIGHT:
                     tfichannel = 1;
@@ -358,6 +543,7 @@ void loop() {
                     }
                     // In poly mode, we need to load all channels eventually
                     applyTFIToAllChannelsImmediate(); // Apply to all 6 channels now
+                    updateFileDisplay();
                     break;
                     
                 case btnLEFT:
@@ -371,6 +557,7 @@ void loop() {
                         tfifilenumber[i] = tfifilenumber[0];
                     }
                     tfiselect(); // This will start the timer for channel 1
+                    updateFileDisplay();
                     break;
                     
                 case btnUP:
@@ -499,7 +686,7 @@ void setup_sd(void) {
     delay(500);
     
     // Use slower speed initially for better reliability
-    if (!SD.begin(SD_CS_PIN, SPI_QUARTER_SPEED, SPI)) {
+    if (!SD.begin(SD_CS_PIN, SPI_HALF_SPEED, SPI)) {
         display.clearDisplay();
         display.setCursor(0, 0);
         display.print("CANNOT FIND SD");
@@ -1305,6 +1492,22 @@ void tfiselect(void) {
     }
 }
 
+void midiNoteToString(uint8_t note, char* noteStr) {
+    const char* noteNames[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    
+    uint8_t octave = (note / 12) - 1;  // MIDI note 60 = C4
+    uint8_t noteIndex = note % 12;
+    
+    // Handle special cases for very low or high notes
+    if (note < 12) {
+        sprintf(noteStr, "%s%d", noteNames[noteIndex], octave + 1);
+    } else if (note > 127) {
+        strcpy(noteStr, "---");
+    } else {
+        sprintf(noteStr, "%s%d", noteNames[noteIndex], octave);
+    }
+}
+
 void loadPendingTFI(void) {
     if (n == 0) return;
 
@@ -1332,8 +1535,16 @@ void loadPendingTFI(void) {
     }
     dataFile.close();
 
-    // Send the MIDI data
-    tfisend(tfiarray, pending_tfi_channel);
+    // In poly mode, apply to all 6 channels
+    if (mode == 3 || mode == 4) {
+        for (uint8_t ch = 1; ch <= 6; ch++) {
+            tfisend(tfiarray, ch);
+            delay(2); // Small delay between channels to prevent UART overrun
+        }
+    } else {
+        // In mono mode, just apply to the specific channel
+        tfisend(tfiarray, pending_tfi_channel);
+    }
 
     // Clear the loading state
     tfi_pending_load = false;
@@ -1344,6 +1555,7 @@ void loadPendingTFI(void) {
         updateFileDisplay();
     }
 }
+
 
 void channelselect(void) {
     if (n == 0) return;  // No files available
@@ -1360,6 +1572,17 @@ void channelselect(void) {
     updateFileDisplay();
 }
 
+void updateMidiDisplay(uint8_t channel, uint8_t note) {
+    last_midi_channel = channel;
+    last_midi_note = note;
+    last_midi_time = millis();
+    
+    // Refresh display if we're in a file browsing mode
+    if (mode == 1 || mode == 3) {
+        updateFileDisplay();
+    }
+}
+
 void updateFileDisplay(void) {
     if (n == 0) return;
     
@@ -1373,6 +1596,17 @@ void updateFileDisplay(void) {
     
     oled_clear();
     oled_print(0, 0, display_buffer);
+    
+    // Add MIDI info to top right if recent MIDI activity
+    if (last_midi_time > 0 && (millis() - last_midi_time) < midi_display_timeout) {
+        char midi_buffer[16];
+        char note_name[8];
+        
+        midiNoteToString(last_midi_note, note_name);
+        sprintf(midi_buffer, "C%d %s", last_midi_channel, note_name);
+        oled_print(75, 0, midi_buffer); // Moved left slightly to fit note names
+    }
+    
     oled_print(0, 16, filenames[tfifilenumber[tfichannel-1]]);
     
     // Show loading indicator if TFI is pending load
@@ -1385,6 +1619,32 @@ void updateFileDisplay(void) {
     
     oled_refresh();
 }
+
+// Alternative shorter format if screen space is tight:
+void midiNoteToStringShort(uint8_t note, char* noteStr) {
+    const char* noteNames[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    
+    uint8_t octave = (note / 12) - 1;
+    uint8_t noteIndex = note % 12;
+    
+    if (note < 12 || note > 127) {
+        strcpy(noteStr, "---");
+    } else {
+        sprintf(noteStr, "%s%d", noteNames[noteIndex], octave);
+    }
+}
+
+// If you want even more compact display, you could show just the note without octave:
+void midiNoteToStringNoOctave(uint8_t note, char* noteStr) {
+    const char* noteNames[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    
+    if (note > 127) {
+        strcpy(noteStr, "---");
+    } else {
+        strcpy(noteStr, noteNames[note % 12]);
+    }
+}
+
 
 void tfisend(int opnarray[42], int sendchannel) {
     // Send all TFI data to appropriate CCs
@@ -1973,20 +2233,51 @@ void handle_midi_input(void) {
 
 
 void handle_note_off(uint8_t channel, uint8_t note, uint8_t velocity) {
-    if (channel >= 1 && channel <= 6) {
-        if (sustain && sustainon[channel-1]) {
-            noteheld[channel-1] = false;
-            return;
-        }
-        polyon[channel-1] = false;
-        noteheld[channel-1] = false;
-        midi_send_note_off(channel, note, velocity);
+    if (mode == 3 || mode == 4) { // if we're in poly mode
+        if (channel == midichannel) {  // and is set to the global midi channel
+            
+            // Find which voice is playing this note
+            for (int i = 0; i <= 5; i++) {
+                handle_midi_input();
+                if (note == polynote[i]) { // if the pitch matches the note being released
+                    
+                    if (sustain) { // if the sustain pedal is held
+                        sustainon[i] = true; // turn on sustain on that channel
+                        noteheld[i] = false; // the key is no longer being held down
+                        break;
+                    } else {
+                        midi_send_note_off(i + 1, note, velocity); // turn that voice off
+                        polyon[i] = false; // turn voice off
+                        polynote[i] = 0; // clear the pitch on that channel
+                        noteheld[i] = false; // the key is no longer being held down
+                        break;
+                    }
+                }
+            }
+            
+            // Count active notes for display feedback
+            notecounter = 0;
+            for (int i = 0; i <= 5; i++) {
+                if (noteheld[i]) notecounter++;
+            }
+            
+        } // if correct MIDI channel
     } else {
-        // Pass other channels straight through
-        MIDI.sendNoteOff(note, velocity, channel);
+        // Mono mode or pass-through - use original behavior
+        if (channel >= 1 && channel <= 6) {
+            if (sustain && sustainon[channel-1]) {
+                noteheld[channel-1] = false;
+                return;
+            }
+            polyon[channel-1] = false;
+            noteheld[channel-1] = false;
+            midi_send_note_off(channel, note, velocity);
+        } else {
+            // Pass other channels straight through
+            MIDI.sendNoteOff(note, velocity, channel);
+        }
     }
 }
-
 
 void handle_pitch_bend(uint8_t channel, int16_t bend) {
     if (channel >= 1 && channel <= 6) {
