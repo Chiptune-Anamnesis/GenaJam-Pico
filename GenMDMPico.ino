@@ -1,4 +1,4 @@
-// GENajam v1.15 Arduino Pico Port - Crunchypotato 2025-SEPTEMBER
+// GENajam v1.16 Arduino Pico Port - Crunchypotato 2025-SEPTEMBER
 // Ported from Arduino Mega 2560 version
 // originally by/forked from JAMATAR 2021-AUGUST
 // --------------------
@@ -30,6 +30,7 @@ MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
 #define POT_OP3_PIN 28
 #define POT_OP4_PIN 29
 #define BTN_PRESET_PIN 20
+#define BTN_PANIC_PIN 21
 #define BTN_LEFT_PIN 14
 #define BTN_RIGHT_PIN 15
 #define BTN_CH_UP_PIN 16
@@ -635,7 +636,7 @@ void setup_oled(void) {
     display.setCursor(0, 0);
     display.print("JamaGEN START!");
     display.setCursor(0, 16);
-    display.print("ver Pico 1.12");
+    display.print("ver Pico 1.16");
     display.display();
     delay(1000);
 }
@@ -661,12 +662,13 @@ void setup_hardware(void) {
     pinMode(BTN_CH_DOWN_PIN, INPUT_PULLUP);
     pinMode(BTN_MONO_POLY_PIN, INPUT_PULLUP);
     pinMode(BTN_DELETE_PIN, INPUT_PULLUP);
+    pinMode(BTN_PANIC_PIN, INPUT_PULLUP);  // ADD THIS LINE
     
     // Read initial pot values - NOW ALL 4 POTS
-    prevpotvalue[0] = analogRead(POT_OP1_PIN) >> 5;  // Convert 12-bit to 7-bit
+    prevpotvalue[0] = analogRead(POT_OP1_PIN) >> 5;
     prevpotvalue[1] = analogRead(POT_OP2_PIN) >> 5;
     prevpotvalue[2] = analogRead(POT_OP3_PIN) >> 5;
-    prevpotvalue[3] = analogRead(POT_OP4_PIN) >> 5;  // NOW READS 4TH POT
+    prevpotvalue[3] = analogRead(POT_OP4_PIN) >> 5;
 }
 
 void setup_sd(void) {
@@ -791,6 +793,9 @@ uint8_t read_buttons(void) {
     static uint64_t last_button_time = 0;
     uint64_t current_time = millis();
     
+    // Add MIDI processing at start of button reading
+    handle_midi_input();
+    
     // Read current button states
     bool left_pressed = !digitalRead(BTN_LEFT_PIN);
     bool right_pressed = !digitalRead(BTN_RIGHT_PIN);
@@ -799,8 +804,18 @@ uint8_t read_buttons(void) {
     bool select_pressed = !digitalRead(BTN_PRESET_PIN);
     bool poly_pressed = !digitalRead(BTN_MONO_POLY_PIN);
     bool delete_pressed = !digitalRead(BTN_DELETE_PIN);
+    bool panic_pressed = !digitalRead(BTN_PANIC_PIN);  // ADD THIS LINE
     
-    // Determine which button is currently pressed
+    // Check for panic button first (highest priority)
+    if (panic_pressed) {
+        if ((current_time - last_button_time) >= initial_debounce) {
+            last_button_time = current_time;
+            midiPanic();  // Call panic immediately
+            return btnNONE;  // Don't return a button code, just execute panic
+        }
+    }
+    
+    // Determine which button is currently pressed (existing logic)
     uint8_t current_button = btnNONE;
     if (left_pressed) current_button = btnLEFT;
     else if (right_pressed) current_button = btnRIGHT;
@@ -810,48 +825,41 @@ uint8_t read_buttons(void) {
     else if (poly_pressed) current_button = btnPOLY;
     else if (delete_pressed) current_button = btnBLANK;
     
-    // Handle button hold detection for LEFT/RIGHT only
+    // Rest of button handling logic unchanged...
     if (current_button == btnLEFT || current_button == btnRIGHT) {
         if (!button_is_held || last_held_button != current_button) {
-            // Starting a new hold or different button
             button_hold_start_time = current_time;
             button_is_held = true;
             last_held_button = current_button;
         }
         
-        // Calculate progressive debounce based on hold duration
         uint32_t hold_duration = current_time - button_hold_start_time;
         uint16_t dynamic_debounce;
         
         if (hold_duration > hold_threshold_2) {
-            // Turbo speed after 3 seconds
             dynamic_debounce = turbo_debounce;
         } else if (hold_duration > hold_threshold_1) {
-            // Fast speed after 1 second
             dynamic_debounce = fast_debounce;
         } else {
-            // Initial speed
             dynamic_debounce = initial_debounce;
         }
         
-        // Check if enough time has passed with dynamic debounce
         if ((current_time - last_button_time) >= dynamic_debounce) {
+            handle_midi_input();
             last_button_time = current_time;
             return current_button;
         }
         
     } else if (current_button != btnNONE) {
-        // Non-accelerated button pressed
         button_is_held = false;
         last_held_button = btnNONE;
         
-        // Use normal debounce for other buttons
         if ((current_time - last_button_time) >= initial_debounce) {
+            handle_midi_input();
             last_button_time = current_time;
             return current_button;
         }
     } else {
-        // No button pressed - reset hold state
         button_is_held = false;
         last_held_button = btnNONE;
     }
@@ -2317,3 +2325,38 @@ void showScanResults() {
     display.display();
     delay(1500);
 }
+
+void midiPanic(void) {
+    // Send All Notes Off and Reset All Controllers to all 6 FM channels
+    for (uint8_t ch = 1; ch <= 6; ch++) {
+        midi_send_cc(ch, 123, 0);  // All Notes Off
+        midi_send_cc(ch, 121, 0);  // Reset All Controllers
+        midi_send_cc(ch, 120, 0);  // All Sound Off (immediate silence)
+        
+        // Clear internal voice tracking
+        polyon[ch-1] = false;
+        polynote[ch-1] = 0;
+        sustainon[ch-1] = false;
+        noteheld[ch-1] = false;
+    }
+    
+    // Reset global state
+    sustain = false;
+    notecounter = 0;
+    lowestnote = 0;
+    
+    // Show panic message briefly
+    oled_clear();
+    oled_print(0, 0, "MIDI PANIC!");
+    oled_print(0, 16, "All notes off");
+    oled_refresh();
+    delay(500);
+    
+    // Refresh normal display based on current mode
+    if (mode == 1 || mode == 3) {
+        updateFileDisplay();
+    } else if (mode == 2 || mode == 4) {
+        fmparamdisplay();
+    }
+}
+   
