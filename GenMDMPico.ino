@@ -78,6 +78,14 @@ unsigned long tfi_select_time = 0;
 bool tfi_pending_load = false;
 uint16_t pending_tfi_channel = 1;
 bool showing_loading = false;
+unsigned long button_hold_start_time = 0;
+uint8_t last_held_button = btnNONE;
+bool button_is_held = false;
+const uint16_t initial_debounce = 200;    // Initial slow debounce
+const uint16_t fast_debounce = 50;        // Fast debounce after acceleration
+const uint16_t turbo_debounce = 20;       // Turbo speed for long holds
+const uint16_t hold_threshold_1 = 1000;   // 1 second to start acceleration
+const uint16_t hold_threshold_2 = 3000;   // 3 seconds to go turbo
 
 File dataFile;
 
@@ -576,48 +584,92 @@ void midi_send_pitch_bend(uint8_t channel, int16_t bend) {
     MIDI.sendPitchBend(bend, channel);
 }
 
+void showAccelerationFeedback(void) {
+    if (!button_is_held) return;
+    
+    uint32_t hold_duration = millis() - button_hold_start_time;
+    
+    // Only show feedback in preset browsing modes
+    if (mode != 1 && mode != 3) return;
+    
+    // Add acceleration indicator to display
+    if (hold_duration > hold_threshold_2) {
+        // Show turbo indicator (could be added to updateFileDisplay)
+        // This is optional visual feedback
+        oled_print(120, 0, ">>>");
+    } else if (hold_duration > hold_threshold_1) {
+        // Show fast indicator
+        oled_print(120, 0, ">>");
+    }
+}
 
 uint8_t read_buttons(void) {
     static uint64_t last_button_time = 0;
     uint64_t current_time = millis();
     
-    if ((current_time - last_button_time) < debouncedelay) {
-        return btnNONE;
-    }
+    // Read current button states
+    bool left_pressed = !digitalRead(BTN_LEFT_PIN);
+    bool right_pressed = !digitalRead(BTN_RIGHT_PIN);
+    bool up_pressed = !digitalRead(BTN_CH_UP_PIN);
+    bool down_pressed = !digitalRead(BTN_CH_DOWN_PIN);
+    bool select_pressed = !digitalRead(BTN_PRESET_PIN);
+    bool poly_pressed = !digitalRead(BTN_MONO_POLY_PIN);
+    bool delete_pressed = !digitalRead(BTN_DELETE_PIN);
     
-    if (!digitalRead(BTN_PRESET_PIN)) {
-        last_button_time = current_time;
-        return btnSELECT;
-    }
+    // Determine which button is currently pressed
+    uint8_t current_button = btnNONE;
+    if (left_pressed) current_button = btnLEFT;
+    else if (right_pressed) current_button = btnRIGHT;
+    else if (up_pressed) current_button = btnUP;
+    else if (down_pressed) current_button = btnDOWN;
+    else if (select_pressed) current_button = btnSELECT;
+    else if (poly_pressed) current_button = btnPOLY;
+    else if (delete_pressed) current_button = btnBLANK;
     
-    if (!digitalRead(BTN_LEFT_PIN)) {
-        last_button_time = current_time;
-        return btnLEFT;
-    }
-    
-    if (!digitalRead(BTN_RIGHT_PIN)) {
-        last_button_time = current_time;
-        return btnRIGHT;
-    }
-    
-    if (!digitalRead(BTN_CH_UP_PIN)) {
-        last_button_time = current_time;
-        return btnUP;
-    }
-    
-    if (!digitalRead(BTN_CH_DOWN_PIN)) {
-        last_button_time = current_time;
-        return btnDOWN;
-    }
-    
-    if (!digitalRead(BTN_MONO_POLY_PIN)) {
-        last_button_time = current_time;
-        return btnPOLY;
-    }
-    
-    if (!digitalRead(BTN_DELETE_PIN)) {
-        last_button_time = current_time;
-        return btnBLANK;
+    // Handle button hold detection for LEFT/RIGHT only
+    if (current_button == btnLEFT || current_button == btnRIGHT) {
+        if (!button_is_held || last_held_button != current_button) {
+            // Starting a new hold or different button
+            button_hold_start_time = current_time;
+            button_is_held = true;
+            last_held_button = current_button;
+        }
+        
+        // Calculate progressive debounce based on hold duration
+        uint32_t hold_duration = current_time - button_hold_start_time;
+        uint16_t dynamic_debounce;
+        
+        if (hold_duration > hold_threshold_2) {
+            // Turbo speed after 3 seconds
+            dynamic_debounce = turbo_debounce;
+        } else if (hold_duration > hold_threshold_1) {
+            // Fast speed after 1 second
+            dynamic_debounce = fast_debounce;
+        } else {
+            // Initial speed
+            dynamic_debounce = initial_debounce;
+        }
+        
+        // Check if enough time has passed with dynamic debounce
+        if ((current_time - last_button_time) >= dynamic_debounce) {
+            last_button_time = current_time;
+            return current_button;
+        }
+        
+    } else if (current_button != btnNONE) {
+        // Non-accelerated button pressed
+        button_is_held = false;
+        last_held_button = btnNONE;
+        
+        // Use normal debounce for other buttons
+        if ((current_time - last_button_time) >= initial_debounce) {
+            last_button_time = current_time;
+            return current_button;
+        }
+    } else {
+        // No button pressed - reset hold state
+        button_is_held = false;
+        last_held_button = btnNONE;
     }
     
     return btnNONE;
@@ -1232,6 +1284,9 @@ void updateFileDisplay(void) {
     if (showing_loading) {
         oled_print(0, 24, "loading tfi...");
     }
+    
+    // Optional: Show acceleration feedback
+    showAccelerationFeedback();
     
     oled_refresh();
 }
