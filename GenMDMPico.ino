@@ -914,7 +914,11 @@ void tfiLoadImmediateOnChannel(uint8_t ch) {
 void applyTFIToAllChannelsImmediate() {
     for (uint8_t ch = 1; ch <= 6; ch++) {
         tfiLoadImmediateOnChannel(ch);
-        delay(2); // tiny pause per voice to avoid UART overruns
+        delay(5); // Small delay between channels to prevent UART overflow
+        // Only add MIDI processing if we're past the initial setup
+        if (booted == 1) {
+            handle_midi_input();
+        }
     }
 }
 
@@ -1648,7 +1652,8 @@ void midiNoteToStringNoOctave(uint8_t note, char* noteStr) {
 
 
 void tfisend(int opnarray[42], int sendchannel) {
-    // Send all TFI data to appropriate CCs
+    // Send all TFI data to appropriate CCs with periodic MIDI processing
+    
     midi_send_cc(sendchannel, 14, opnarray[0] * 16);   // Algorithm
     midi_send_cc(sendchannel, 15, opnarray[1] * 16);   // Feedback
     
@@ -1662,6 +1667,7 @@ void tfisend(int opnarray[42], int sendchannel) {
     midi_send_cc(sendchannel, 26, opnarray[23] * 32);  // OP2 Detune
     midi_send_cc(sendchannel, 27, opnarray[33] * 32);  // OP4 Detune
     delayMicroseconds(1500);
+    handle_midi_input(); // Process MIDI after detune section
     
     midi_send_cc(sendchannel, 16, 127 - opnarray[4]);  // OP1 Total Level
     midi_send_cc(sendchannel, 17, 127 - opnarray[14]); // OP3 Total Level
@@ -1672,6 +1678,7 @@ void tfisend(int opnarray[42], int sendchannel) {
     midi_send_cc(sendchannel, 40, opnarray[15] * 32);  // OP3 Rate Scaling
     midi_send_cc(sendchannel, 41, opnarray[25] * 32);  // OP2 Rate Scaling
     midi_send_cc(sendchannel, 42, opnarray[35] * 32);  // OP4 Rate Scaling
+    handle_midi_input(); // Process MIDI after rate scaling
     
     midi_send_cc(sendchannel, 43, opnarray[6] * 4);    // OP1 Attack Rate
     midi_send_cc(sendchannel, 44, opnarray[16] * 4);   // OP3 Attack Rate
@@ -1682,6 +1689,7 @@ void tfisend(int opnarray[42], int sendchannel) {
     midi_send_cc(sendchannel, 48, opnarray[17] * 4);   // OP3 1st Decay Rate
     midi_send_cc(sendchannel, 49, opnarray[27] * 4);   // OP2 1st Decay Rate
     midi_send_cc(sendchannel, 50, opnarray[37] * 4);   // OP4 1st Decay Rate
+    handle_midi_input(); // Process MIDI after envelope rates
     
     midi_send_cc(sendchannel, 55, opnarray[10] * 8);   // OP1 2nd Total Level
     midi_send_cc(sendchannel, 56, opnarray[20] * 8);   // OP3 2nd Total Level
@@ -1692,6 +1700,7 @@ void tfisend(int opnarray[42], int sendchannel) {
     midi_send_cc(sendchannel, 52, opnarray[18] * 8);   // OP3 2nd Decay Rate
     midi_send_cc(sendchannel, 53, opnarray[28] * 8);   // OP2 2nd Decay Rate
     midi_send_cc(sendchannel, 54, opnarray[38] * 8);   // OP4 2nd Decay Rate
+    handle_midi_input(); // Process MIDI after sustain/decay
     
     midi_send_cc(sendchannel, 59, opnarray[9] * 8);    // OP1 Release Rate
     midi_send_cc(sendchannel, 60, opnarray[19] * 8);   // OP3 Release Rate
@@ -1702,6 +1711,7 @@ void tfisend(int opnarray[42], int sendchannel) {
     midi_send_cc(sendchannel, 91, opnarray[21] * 8);   // OP3 SSG-EG
     midi_send_cc(sendchannel, 92, opnarray[31] * 8);   // OP2 SSG-EG
     midi_send_cc(sendchannel, 93, opnarray[41] * 8);   // OP4 SSG-EG
+    handle_midi_input(); // Process MIDI after SSG-EG
     
     midi_send_cc(sendchannel, 75, 90);  // FM Level
     midi_send_cc(sendchannel, 76, 90);  // AM Level
@@ -1712,7 +1722,7 @@ void tfisend(int opnarray[42], int sendchannel) {
     midi_send_cc(sendchannel, 72, 0);   // OP2 Amplitude Modulation (off)
     midi_send_cc(sendchannel, 73, 0);   // OP4 Amplitude Modulation (off)
     
-    // Store TFI settings in global array for editing
+    // Store TFI settings in global array for editing (unchanged)
     fmsettings[sendchannel-1][0] = opnarray[0] * 16;    // Algorithm
     fmsettings[sendchannel-1][1] = opnarray[1] * 16;    // Feedback
     fmsettings[sendchannel-1][2] = opnarray[2] * 8;     // OP1 Multiplier
