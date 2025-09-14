@@ -197,10 +197,38 @@ void midi_send_note_on(uint8_t channel, uint8_t note, uint8_t velocity);
 void midi_send_note_off(uint8_t channel, uint8_t note, uint8_t velocity);
 void midi_send_pitch_bend(uint8_t channel, int16_t bend);
 void handle_midi_input(void);
-void handle_note_on(uint8_t channel, uint8_t note, uint8_t velocity);
-void handle_note_off(uint8_t channel, uint8_t note, uint8_t velocity);
-void handle_control_change(uint8_t channel, uint8_t cc, uint8_t value);
-void handle_pitch_bend(uint8_t channel, int16_t bend);
+void handle_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
+    if (channel >= 1 && channel <= 6) {
+        polyon[channel-1] = true;
+        polynote[channel-1] = note;
+        noteheld[channel-1] = true;
+        midi_send_note_on(channel, note, velocity);
+    } else {
+        // Pass other channels straight through
+        MIDI.sendNoteOn(note, velocity, channel);
+    }
+}
+void handle_control_change(uint8_t channel, uint8_t cc, uint8_t value) {
+    if (channel >= 1 && channel <= 6) {
+        if (cc == 64) {
+            if (value >= 64) {
+                sustain = true;
+                sustainon[channel-1] = true;
+            } else {
+                sustainon[channel-1] = false;
+                if (!noteheld[channel-1] && polyon[channel-1]) {
+                    midi_send_note_off(channel, polynote[channel-1], 0);
+                    polyon[channel-1] = false;
+                }
+                sustain = false;
+            }
+        }
+        midi_send_cc(channel, cc, value);
+    } else {
+        // Pass other channels straight through
+        MIDI.sendControlChange(cc, value, channel);
+    }
+}
 
 // Utility functions
 void printzeros(int zeronum, char* buffer);
@@ -371,7 +399,7 @@ void loop() {
                         tfifilenumber[i] = tfifilenumber[0];
                     }
                     // In poly mode, we need to load all channels eventually
-                    tfiselect(); // This will start the timer for channel 1
+                    applyTFIToAllChannelsImmediate(); // Apply to all 6 channels now
                     break;
                     
                 case btnLEFT:
@@ -566,6 +594,16 @@ void setup_midi(void) {
     MIDI.setHandlePitchBend([](byte channel, int bend) {
         handle_pitch_bend(channel, (int16_t)bend);
     });
+    // Forward Program Change & Aftertouch for channels outside 1..6
+    MIDI.setHandleProgramChange([](byte channel, byte number) {
+        if (channel < 1 || channel > 6) MIDI.sendProgramChange(number, channel);
+    });
+    MIDI.setHandleAfterTouchChannel([](byte channel, byte pressure) {
+        if (channel < 1 || channel > 6) MIDI.sendAfterTouch(pressure, channel);
+    });
+    MIDI.setHandleAfterTouchPoly([](byte channel, byte note, byte pressure) {
+        if (channel < 1 || channel > 6) MIDI.sendAfterTouch(note, pressure, channel);
+    });
 }
 
 void midi_send_cc(uint8_t channel, uint8_t cc, uint8_t value) {
@@ -699,6 +737,42 @@ void tfiLoadImmediate(void) {
 
     tfisend(tfiarray, tfichannel);
 }
+
+// Load and apply the currently selected TFI for a specific FM channel (1..6)
+// without relying on the global tfichannel.
+void tfiLoadImmediateOnChannel(uint8_t ch) {
+    if (n == 0) return;
+    if (ch < 1 || ch > 6) return;
+
+    uint16_t idx = tfifilenumber[ch - 1];
+    if (idx >= n) return;
+
+    File f = SD.open(fullnames[idx], FILE_READ);
+    if (!f) return;
+
+    int tfiarray[42];
+    for (int i = 0; i < 42; i++) {
+        if (f.available()) {
+            tfiarray[i] = f.read();
+        } else {
+            tfiarray[i] = 0;
+        }
+    }
+    f.close();
+
+    // Send parameters explicitly to the requested channel
+    tfisend(tfiarray, ch);
+}
+
+// Apply the tfifilenumber-selected TFI to all six FM channels immediately.
+void applyTFIToAllChannelsImmediate() {
+    for (uint8_t ch = 1; ch <= 6; ch++) {
+        tfiLoadImmediateOnChannel(ch);
+        delay(2); // tiny pause per voice to avoid UART overruns
+    }
+}
+
+
 
 void scandir(bool saved) {
     File root = SD.open("/");
@@ -1206,15 +1280,23 @@ void tfiselect(void) {
     uint16_t idx = tfifilenumber[tfichannel-1];
     if (idx >= n) return;
 
-    // Mark that we need to load this TFI after delay
+    // Remember which channel this choice is for
     tfi_select_time = millis();
     tfi_pending_load = true;
     pending_tfi_channel = tfichannel;
     showing_loading = false;
 
-    // Only update display immediately - no SD card access or MIDI sending
-    if (booted == 1 && (mode == 1 || mode == 3)) {
+    // In MONO modes, apply immediately so the channel is initialized without delay
+    if (mode == 1 || mode == 2) {
+        tfiLoadImmediateOnChannel(tfichannel); // applies to current tfichannel
         updateFileDisplay();
+        tfi_pending_load = false;   // we've already applied it
+        showing_loading = false;
+    } else {
+        // In POLY modes, just update display now; delayed loader will show UI and apply
+        if (booted == 1 && (mode == 1 || mode == 3)) {
+            updateFileDisplay();
+        }
     }
 }
 
@@ -1260,8 +1342,16 @@ void loadPendingTFI(void) {
 
 void channelselect(void) {
     if (n == 0) return;  // No files available
-    
-    // FIXED: Just call the display update function instead of duplicating code
+
+    // When switching MONO channels, immediately initialize the newly selected channel
+    // with the currently selected TFI so it has a valid sound/params.
+    // Also send All Notes Off / Reset All Controllers for a clean slate.
+    if (mode == 1 || mode == 2) { // MONO | Preset or MONO | Edit
+        midi_send_cc(tfichannel, 123, 0); // All Notes Off (per-channel)
+        midi_send_cc(tfichannel, 121, 0); // Reset All Controllers (if supported)
+        tfiLoadImmediateOnChannel(tfichannel); // Apply the current TFI to this channel now
+    }
+
     updateFileDisplay();
 }
 
@@ -1305,6 +1395,7 @@ void tfisend(int opnarray[42], int sendchannel) {
     midi_send_cc(sendchannel, 25, opnarray[13] * 32);  // OP3 Detune
     midi_send_cc(sendchannel, 26, opnarray[23] * 32);  // OP2 Detune
     midi_send_cc(sendchannel, 27, opnarray[33] * 32);  // OP4 Detune
+    delayMicroseconds(1500);
     
     midi_send_cc(sendchannel, 16, 127 - opnarray[4]);  // OP1 Total Level
     midi_send_cc(sendchannel, 17, 127 - opnarray[14]); // OP3 Total Level
@@ -1356,56 +1447,56 @@ void tfisend(int opnarray[42], int sendchannel) {
     midi_send_cc(sendchannel, 73, 0);   // OP4 Amplitude Modulation (off)
     
     // Store TFI settings in global array for editing
-    fmsettings[tfichannel-1][0] = opnarray[0] * 16;    // Algorithm
-    fmsettings[tfichannel-1][1] = opnarray[1] * 16;    // Feedback
-    fmsettings[tfichannel-1][2] = opnarray[2] * 8;     // OP1 Multiplier
-    fmsettings[tfichannel-1][12] = opnarray[12] * 8;   // OP3 Multiplier
-    fmsettings[tfichannel-1][22] = opnarray[22] * 8;   // OP2 Multiplier
-    fmsettings[tfichannel-1][32] = opnarray[32] * 8;   // OP4 Multiplier
-    fmsettings[tfichannel-1][3] = opnarray[3] * 32;    // OP1 Detune
-    fmsettings[tfichannel-1][13] = opnarray[13] * 32;  // OP3 Detune
-    fmsettings[tfichannel-1][23] = opnarray[23] * 32;  // OP2 Detune
-    fmsettings[tfichannel-1][33] = opnarray[33] * 32;  // OP4 Detune
-    fmsettings[tfichannel-1][4] = 127 - opnarray[4];   // OP1 Total Level
-    fmsettings[tfichannel-1][14] = 127 - opnarray[14]; // OP3 Total Level
-    fmsettings[tfichannel-1][24] = 127 - opnarray[24]; // OP2 Total Level
-    fmsettings[tfichannel-1][34] = 127 - opnarray[34]; // OP4 Total Level
-    fmsettings[tfichannel-1][5] = opnarray[5] * 32;    // OP1 Rate Scaling
-    fmsettings[tfichannel-1][15] = opnarray[15] * 32;  // OP3 Rate Scaling
-    fmsettings[tfichannel-1][25] = opnarray[25] * 32;  // OP2 Rate Scaling
-    fmsettings[tfichannel-1][35] = opnarray[35] * 32;  // OP4 Rate Scaling
-    fmsettings[tfichannel-1][6] = opnarray[6] * 4;     // OP1 Attack Rate
-    fmsettings[tfichannel-1][16] = opnarray[16] * 4;   // OP3 Attack Rate
-    fmsettings[tfichannel-1][26] = opnarray[26] * 4;   // OP2 Attack Rate
-    fmsettings[tfichannel-1][36] = opnarray[36] * 4;   // OP4 Attack Rate
-    fmsettings[tfichannel-1][7] = opnarray[7] * 4;     // OP1 1st Decay Rate
-    fmsettings[tfichannel-1][17] = opnarray[17] * 4;   // OP3 1st Decay Rate
-    fmsettings[tfichannel-1][27] = opnarray[27] * 4;   // OP2 1st Decay Rate
-    fmsettings[tfichannel-1][37] = opnarray[37] * 4;   // OP4 1st Decay Rate
-    fmsettings[tfichannel-1][10] = 127 - (opnarray[10] * 8); // OP1 2nd Total Level
-    fmsettings[tfichannel-1][20] = 127 - (opnarray[20] * 8); // OP3 2nd Total Level
-    fmsettings[tfichannel-1][30] = 127 - (opnarray[30] * 8); // OP2 2nd Total Level
-    fmsettings[tfichannel-1][40] = 127 - (opnarray[40] * 8); // OP4 2nd Total Level
-    fmsettings[tfichannel-1][8] = opnarray[8] * 8;     // OP1 2nd Decay Rate
-    fmsettings[tfichannel-1][18] = opnarray[18] * 8;   // OP3 2nd Decay Rate
-    fmsettings[tfichannel-1][28] = opnarray[28] * 8;   // OP2 2nd Decay Rate
-    fmsettings[tfichannel-1][38] = opnarray[38] * 8;   // OP4 2nd Decay Rate
-    fmsettings[tfichannel-1][9] = opnarray[9] * 8;     // OP1 Release Rate
-    fmsettings[tfichannel-1][19] = opnarray[19] * 8;   // OP3 Release Rate
-    fmsettings[tfichannel-1][29] = opnarray[29] * 8;   // OP2 Release Rate
-    fmsettings[tfichannel-1][39] = opnarray[39] * 8;   // OP4 Release Rate
-    fmsettings[tfichannel-1][11] = opnarray[11] * 8;   // OP1 SSG-EG
-    fmsettings[tfichannel-1][21] = opnarray[21] * 8;   // OP3 SSG-EG
-    fmsettings[tfichannel-1][31] = opnarray[31] * 8;   // OP2 SSG-EG
-    fmsettings[tfichannel-1][41] = opnarray[41] * 8;   // OP4 SSG-EG
-    fmsettings[tfichannel-1][42] = 90;  // FM Level
-    fmsettings[tfichannel-1][43] = 90;  // AM Level
-    fmsettings[tfichannel-1][44] = 127; // Stereo (centered)
-    fmsettings[tfichannel-1][45] = 0;   // OP1 Amplitude Modulation
-    fmsettings[tfichannel-1][46] = 0;   // OP3 Amplitude Modulation
-    fmsettings[tfichannel-1][47] = 0;   // OP2 Amplitude Modulation
-    fmsettings[tfichannel-1][48] = 0;   // OP4 Amplitude Modulation
-    fmsettings[tfichannel-1][49] = 0;   // Patch is unedited
+    fmsettings[sendchannel-1][0] = opnarray[0] * 16;    // Algorithm
+    fmsettings[sendchannel-1][1] = opnarray[1] * 16;    // Feedback
+    fmsettings[sendchannel-1][2] = opnarray[2] * 8;     // OP1 Multiplier
+    fmsettings[sendchannel-1][12] = opnarray[12] * 8;   // OP3 Multiplier
+    fmsettings[sendchannel-1][22] = opnarray[22] * 8;   // OP2 Multiplier
+    fmsettings[sendchannel-1][32] = opnarray[32] * 8;   // OP4 Multiplier
+    fmsettings[sendchannel-1][3] = opnarray[3] * 32;    // OP1 Detune
+    fmsettings[sendchannel-1][13] = opnarray[13] * 32;  // OP3 Detune
+    fmsettings[sendchannel-1][23] = opnarray[23] * 32;  // OP2 Detune
+    fmsettings[sendchannel-1][33] = opnarray[33] * 32;  // OP4 Detune
+    fmsettings[sendchannel-1][4] = 127 - opnarray[4];   // OP1 Total Level
+    fmsettings[sendchannel-1][14] = 127 - opnarray[14]; // OP3 Total Level
+    fmsettings[sendchannel-1][24] = 127 - opnarray[24]; // OP2 Total Level
+    fmsettings[sendchannel-1][34] = 127 - opnarray[34]; // OP4 Total Level
+    fmsettings[sendchannel-1][5] = opnarray[5] * 32;    // OP1 Rate Scaling
+    fmsettings[sendchannel-1][15] = opnarray[15] * 32;  // OP3 Rate Scaling
+    fmsettings[sendchannel-1][25] = opnarray[25] * 32;  // OP2 Rate Scaling
+    fmsettings[sendchannel-1][35] = opnarray[35] * 32;  // OP4 Rate Scaling
+    fmsettings[sendchannel-1][6] = opnarray[6] * 4;     // OP1 Attack Rate
+    fmsettings[sendchannel-1][16] = opnarray[16] * 4;   // OP3 Attack Rate
+    fmsettings[sendchannel-1][26] = opnarray[26] * 4;   // OP2 Attack Rate
+    fmsettings[sendchannel-1][36] = opnarray[36] * 4;   // OP4 Attack Rate
+    fmsettings[sendchannel-1][7] = opnarray[7] * 4;     // OP1 1st Decay Rate
+    fmsettings[sendchannel-1][17] = opnarray[17] * 4;   // OP3 1st Decay Rate
+    fmsettings[sendchannel-1][27] = opnarray[27] * 4;   // OP2 1st Decay Rate
+    fmsettings[sendchannel-1][37] = opnarray[37] * 4;   // OP4 1st Decay Rate
+    fmsettings[sendchannel-1][10] = 127 - (opnarray[10] * 8); // OP1 2nd Total Level
+    fmsettings[sendchannel-1][20] = 127 - (opnarray[20] * 8); // OP3 2nd Total Level
+    fmsettings[sendchannel-1][30] = 127 - (opnarray[30] * 8); // OP2 2nd Total Level
+    fmsettings[sendchannel-1][40] = 127 - (opnarray[40] * 8); // OP4 2nd Total Level
+    fmsettings[sendchannel-1][8] = opnarray[8] * 8;     // OP1 2nd Decay Rate
+    fmsettings[sendchannel-1][18] = opnarray[18] * 8;   // OP3 2nd Decay Rate
+    fmsettings[sendchannel-1][28] = opnarray[28] * 8;   // OP2 2nd Decay Rate
+    fmsettings[sendchannel-1][38] = opnarray[38] * 8;   // OP4 2nd Decay Rate
+    fmsettings[sendchannel-1][9] = opnarray[9] * 8;     // OP1 Release Rate
+    fmsettings[sendchannel-1][19] = opnarray[19] * 8;   // OP3 Release Rate
+    fmsettings[sendchannel-1][29] = opnarray[29] * 8;   // OP2 Release Rate
+    fmsettings[sendchannel-1][39] = opnarray[39] * 8;   // OP4 Release Rate
+    fmsettings[sendchannel-1][11] = opnarray[11] * 8;   // OP1 SSG-EG
+    fmsettings[sendchannel-1][21] = opnarray[21] * 8;   // OP3 SSG-EG
+    fmsettings[sendchannel-1][31] = opnarray[31] * 8;   // OP2 SSG-EG
+    fmsettings[sendchannel-1][41] = opnarray[41] * 8;   // OP4 SSG-EG
+    fmsettings[sendchannel-1][42] = 90;  // FM Level
+    fmsettings[sendchannel-1][43] = 90;  // AM Level
+    fmsettings[sendchannel-1][44] = 127; // Stereo (centered)
+    fmsettings[sendchannel-1][45] = 0;   // OP1 Amplitude Modulation
+    fmsettings[sendchannel-1][46] = 0;   // OP3 Amplitude Modulation
+    fmsettings[sendchannel-1][47] = 0;   // OP2 Amplitude Modulation
+    fmsettings[sendchannel-1][48] = 0;   // OP4 Amplitude Modulation
+    fmsettings[sendchannel-1][49] = 0;   // Patch is unedited
 }
 
 void fmparamdisplay(void) {
@@ -1875,161 +1966,28 @@ void handle_midi_input(void) {
 }
 
 
-void handle_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
-    // Only respond to our MIDI channel
-    if (channel != midichannel) return;
-    
-    // Handle polyphonic mode
-    if (mode == 3 || mode == 4) {
-        // Find an available voice
-        for (int i = 0; i < polyvoicenum; i++) {
-            if (!polyon[i]) {
-                polyon[i] = true;
-                polynote[i] = note;
-                noteheld[i] = true;
-                
-                // Send note to this FM channel
-                midi_send_note_on(i + 1, note, velocity);
-                break;
-            }
-        }
-    } else {
-        // Monophonic mode - send to current channel
-        midi_send_note_on(tfichannel, note, velocity);
-        noteheld[tfichannel - 1] = true;
-    }
-}
 
 void handle_note_off(uint8_t channel, uint8_t note, uint8_t velocity) {
-    // Only respond to our MIDI channel
-    if (channel != midichannel) return;
-    
-    // Handle polyphonic mode
-    if (mode == 3 || mode == 4) {
-        // Find the voice playing this note
-        for (int i = 0; i < polyvoicenum; i++) {
-            if (polyon[i] && polynote[i] == note) {
-                if (!sustain || !sustainon[i]) {
-                    polyon[i] = false;
-                    noteheld[i] = false;
-                    midi_send_note_off(i + 1, note, velocity);
-                } else {
-                    // Note is held by sustain pedal
-                    noteheld[i] = false;
-                }
-                break;
-            }
+    if (channel >= 1 && channel <= 6) {
+        if (sustain && sustainon[channel-1]) {
+            noteheld[channel-1] = false;
+            return;
         }
+        polyon[channel-1] = false;
+        noteheld[channel-1] = false;
+        midi_send_note_off(channel, note, velocity);
     } else {
-        // Monophonic mode
-        if (!sustain || !sustainon[tfichannel - 1]) {
-            midi_send_note_off(tfichannel, note, velocity);
-            noteheld[tfichannel - 1] = false;
-        } else {
-            noteheld[tfichannel - 1] = false;
-        }
+        // Pass other channels straight through
+        MIDI.sendNoteOff(note, velocity, channel);
     }
 }
 
-void handle_control_change(uint8_t channel, uint8_t cc, uint8_t value) {
-    // Only respond to our MIDI channel
-    if (channel != midichannel) return;
-    
-    switch (cc) {
-        case 64: // Sustain Pedal
-            sustain = (value >= 64);
-            
-            if (!sustain) {
-                // Release all sustained notes
-                if (mode == 3 || mode == 4) {
-                    // Polyphonic mode
-                    for (int i = 0; i < polyvoicenum; i++) {
-                        if (sustainon[i] && !noteheld[i]) {
-                            polyon[i] = false;
-                            sustainon[i] = false;
-                            midi_send_note_off(i + 1, polynote[i], 0);
-                        }
-                    }
-                } else {
-                    // Monophonic mode
-                    if (sustainon[tfichannel - 1] && !noteheld[tfichannel - 1]) {
-                        sustainon[tfichannel - 1] = false;
-                        // Send note off for last played note if we tracked it
-                    }
-                }
-            } else {
-                // Mark currently playing notes as sustained
-                if (mode == 3 || mode == 4) {
-                    for (int i = 0; i < polyvoicenum; i++) {
-                        if (polyon[i]) {
-                            sustainon[i] = true;
-                        }
-                    }
-                } else {
-                    sustainon[tfichannel - 1] = true;
-                }
-            }
-            break;
-            
-        case 1: // Modulation Wheel
-            // Send LFO speed to all channels
-            lfospeed = value;
-            for (int i = 1; i <= 6; i++) {
-                midi_send_cc(i, 1, value);
-            }
-            break;
-            
-        case 7: // Volume
-            // Send volume to current channel(s)
-            if (mode == 3 || mode == 4) {
-                // Poly mode - send to all channels
-                for (int i = 1; i <= 6; i++) {
-                    midi_send_cc(i, 7, value);
-                }
-            } else {
-                // Mono mode - send to current channel
-                midi_send_cc(tfichannel, 7, value);
-            }
-            break;
-            
-        case 10: // Pan
-            if (mode == 3 || mode == 4) {
-                // Poly mode - send to all channels
-                for (int i = 1; i <= 6; i++) {
-                    midi_send_cc(i, 77, value);
-                    fmsettings[i-1][44] = value;
-                }
-            } else {
-                midi_send_cc(tfichannel, 77, value);
-                fmsettings[tfichannel-1][44] = value;
-            }
-            break;
-            
-        default:
-            // Pass through other CCs to the current channel
-            if (mode == 3 || mode == 4) {
-                // Poly mode - send to all channels
-                for (int i = 1; i <= 6; i++) {
-                    midi_send_cc(i, cc, value);
-                }
-            } else {
-                midi_send_cc(tfichannel, cc, value);
-            }
-            break;
-    }
-}
 
 void handle_pitch_bend(uint8_t channel, int16_t bend) {
-    // Only respond to our MIDI channel
-    if (channel != midichannel) return;
-    
-    if (mode == 3 || mode == 4) {
-        // Poly mode - send to all channels
-        for (int i = 1; i <= 6; i++) {
-            midi_send_pitch_bend(i, bend);
-        }
+    if (channel >= 1 && channel <= 6) {
+        midi_send_pitch_bend(channel, bend);
     } else {
-        // Mono mode - send to current channel
-        midi_send_pitch_bend(tfichannel, bend);
+        // Pass other channels straight through
+        MIDI.sendPitchBend(bend, channel);
     }
 }
