@@ -193,7 +193,6 @@ Buttons (Digital, with pullups):
 ## Credits
 
 - **Original GENajam**: JAMATAR (2021)
-- **Pico Port**: Crunchypotato (2025)
 - **GENMDM Module**: Little-scale
 - **Velocity Curve**: impbox
 - **Base Project**: Catskull Electronics
