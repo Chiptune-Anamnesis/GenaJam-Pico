@@ -17,7 +17,7 @@ A Raspberry Pi Pico (RP2040) port of the GENajam MIDI controller for Little-scal
 - **Delayed loading system** - smooth file browsing without MIDI lag
 - **Accelerated navigation** - hold left/right for fast file scrolling
 - **Real-time MIDI display** - shows incoming channel and note names (C4, F#3, etc.)
-- **Real-time MIDI display** - Bar Graph shows incoming MIDI CH. 1-11
+- **Bar Graph Viz** - Bar Graph shows incoming MIDI CH. 1-11
 - **Modern hardware support** - optimized for RP2040 architecture
 
 ## Hardware Requirements
