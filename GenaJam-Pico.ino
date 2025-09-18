@@ -28,7 +28,7 @@ MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
 #define POT_OP1_PIN 26
 #define POT_OP2_PIN 27
 #define BTN_PRESET_PIN 20
-#define BTN_PANIC_PIN 22
+#define BTN__PIN 22
 #define BTN_LEFT_PIN 14
 #define BTN_RIGHT_PIN 15
 #define BTN_CH_UP_PIN 16
@@ -2526,36 +2526,84 @@ void showScanResults() {
 }
 
 void midiPanic(void) {
-    // Send All Notes Off and Reset All Controllers to all 6 FM channels
-    for (uint8_t ch = 1; ch <= 6; ch++) {
+    // Send multiple types of panic messages to ensure all notes stop
+    for (uint8_t ch = 1; ch <= 16; ch++) {  // Send to all 16 MIDI channels, not just FM
+        midi_send_cc(ch, 120, 0);  // All Sound Off (immediate silence)
         midi_send_cc(ch, 123, 0);  // All Notes Off
         midi_send_cc(ch, 121, 0);  // Reset All Controllers
-        midi_send_cc(ch, 120, 0);  // All Sound Off (immediate silence)
+        midi_send_cc(ch, 64, 0);   // Sustain pedal off
+        midi_send_cc(ch, 66, 0);   // Sostenuto pedal off
+        midi_send_cc(ch, 67, 0);   // Soft pedal off
         
-        // Clear internal voice tracking
-        polyon[ch-1] = false;
-        polynote[ch-1] = 0;
-        sustainon[ch-1] = false;
-        noteheld[ch-1] = false;
+        // Small delay to ensure messages are processed
+        delayMicroseconds(500);
+        handle_midi_input();
     }
     
-    // Reset global state
+    // Additional GENMDM-specific reset commands
+    // Send to all FM channels with more aggressive reset
+    for (uint8_t ch = 1; ch <= 6; ch++) {
+        // Force all operators to minimum volume
+        midi_send_cc(ch, 16, 127);  // OP1 Total Level to max (minimum volume)
+        midi_send_cc(ch, 17, 127);  // OP3 Total Level to max
+        midi_send_cc(ch, 18, 127);  // OP2 Total Level to max  
+        midi_send_cc(ch, 19, 127);  // OP4 Total Level to max
+        
+        // Reset key parameters
+        midi_send_cc(ch, 77, 64);   // Pan to center
+        midi_send_cc(ch, 7, 100);   // Main volume
+        midi_send_cc(ch, 11, 127);  // Expression
+        
+        delayMicroseconds(1000);
+        handle_midi_input();
+    }
+    
+    // Clear ALL internal voice tracking (expanded)
+    for (int i = 0; i < 6; i++) {
+        polyon[i] = false;
+        polynote[i] = 0;
+        sustainon[i] = false;
+        noteheld[i] = false;
+    }
+    
+    // Reset ALL global state
     sustain = false;
     notecounter = 0;
     lowestnote = 0;
     
-    // Show panic message briefly
+    // Clear visualizer state too
+    for (int i = 0; i < 11; i++) {
+        voice_velocity[i] = 0;
+        voice_peak[i] = 0;
+        voice_peak_time[i] = 0;
+    }
+    
+    // Send a final burst of note-offs for any potentially stuck notes
+    for (uint8_t ch = 1; ch <= 6; ch++) {
+        for (uint8_t note = 0; note < 128; note += 12) {  // Send note-offs across octaves
+            midi_send_note_off(ch, note, 0);
+            midi_send_note_off(ch, note + 4, 0);  // Major thirds
+            midi_send_note_off(ch, note + 7, 0);  // Perfect fifths
+        }
+        handle_midi_input();
+    }
+    
+    // Show panic message
     oled_clear();
     oled_print(0, 0, "MIDI PANIC!");
     oled_print(0, 16, "All notes off");
     oled_refresh();
-    delay(500);
+    delay(1000);  // Longer delay to ensure all messages are sent
     
-    // Refresh normal display based on current mode
+    // Force refresh display based on current mode
+    messagestart = millis();
+    refreshscreen = 1;
     if (mode == 1 || mode == 3) {
         updateFileDisplay();
     } else if (mode == 2 || mode == 4) {
         fmparamdisplay();
+    } else if (mode == 5 || mode == 6) {
+        visualizerDisplay();
     }
 }
    
