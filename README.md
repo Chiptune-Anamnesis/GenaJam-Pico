@@ -45,10 +45,9 @@ MIDI:
 - RX: Pin 1
 
 Potentiometers (Analog):
-- OP1: Pin 26
-- OP2: Pin 27
-- OP3: Pin 28
-- OP4: Pin 29
+- Multiplexer: Pin 28
+- Multiplexer: C0-C3 to Pots
+- Multiplexer S0-S3: Pin 10-13
 
 Buttons (Digital, with pullups):
 - Preset/Edit: Pin 20
