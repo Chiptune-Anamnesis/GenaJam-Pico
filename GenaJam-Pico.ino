@@ -1,4 +1,4 @@
-// GENajam v1.17 Arduino Pico Port - Crunchypotato 2025-SEPTEMBER
+// GENajam v1.18 Arduino Pico Port - Crunchypotato 2025-SEPTEMBER
 // Ported from Arduino Mega 2560 version
 // originally by/forked from JAMATAR 2021-AUGUST
 // --------------------
