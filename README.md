@@ -186,7 +186,7 @@ Buttons (Digital, with pullups):
 
 ### Memory Management
 - **EEPROM storage** for MIDI channel and region settings
-- **Efficient file indexing** supports 999+ TFI files
+- **Efficient file indexing** supports 999 TFI files
 - **Real-time parameter tracking** for all 6 channels
 
 ## Credits
