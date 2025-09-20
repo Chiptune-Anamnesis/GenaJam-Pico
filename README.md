@@ -68,22 +68,26 @@ Buttons (Digital, with pullups):
 - Use LEFT/RIGHT to browse presets
 - Immediate loading for responsive channel switching
 
-### Mode 2: Mono Edit
+### Mode 1a: Mono Edit
 - Real-time FM parameter editing
 - 4 pots control selected parameter screen
 - 13 parameter screens available
 - Changes apply to current channel only
 
-### Mode 3: Poly Preset
+### Mode 2: Poly Preset
 - Browse presets for polyphonic play
 - All 6 channels loaded with same preset
 - 2-second delayed loading prevents browsing lag
 - DELETE button removes files
 
-### Mode 4: Poly Edit
+### Mode 2a: Poly Edit
 - Real-time editing in poly mode
 - Parameter changes affect all 6 channels
 - Same 13 parameter screens as mono mode
+
+### Mode 3: MIDI Visualization
+- Real-time bar meter for channels 1-11
+
 
 ## MIDI Features
 
@@ -153,9 +157,11 @@ Buttons (Digital, with pullups):
 - **UP/DOWN**: Select channel (mono) or save options (poly)
 - **DELETE**: Delete files (poly mode only)
 - **PANIC**: Emergency all-notes-off
+- **OPT1**: Future Feature Placeholder
+- **OPT2**: Future Feature Placeholder
 
 ### Editing
-- **4 Potentiometers**: Control selected parameters
+- **4 Potentiometers thru Multiplexer**: Control selected parameters
 - Real-time visual feedback on OLED
 - Parameter values update immediately
 - Changes affect current channel (mono) or all channels (poly)
@@ -187,6 +193,7 @@ Buttons (Digital, with pullups):
 ### Memory Management
 - **EEPROM storage** for MIDI channel and region settings
 - **Efficient file indexing** supports 999 TFI files
+- **Scans through top level folders** basic TFI file organization allowed
 - **Real-time parameter tracking** for all 6 channels
 
 ## Credits
